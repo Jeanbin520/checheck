@@ -1,5 +1,7 @@
 # Public Welfare Site Check-in Assistant
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 A Chrome Manifest V3 extension for managing a small set of supported public welfare sites and running daily check-ins from one side panel.
 
 The extension is designed for sites based on `new-api` and for sites that use LinuxDO OAuth login. It provides preset site entries, one-click check-in, runtime logs, and adapter-based automation for site-specific login and check-in flows.
@@ -36,14 +38,13 @@ Current adapters:
 
 ```text
 .
-├── adapters/              # Site-specific and fallback check-in adapters
-├── background/            # MV3 service worker and check-in execution engine
-├── content/               # Page detector content script
-├── docs/                  # Planning notes and supporting documentation
-├── icons/                 # Extension icons
-├── lib/                   # Storage helpers and preset site definitions
-├── popup/                 # Side panel HTML, CSS, and JavaScript
-└── manifest.json          # Chrome extension manifest
+|-- adapters/              # Site-specific and fallback check-in adapters
+|-- background/            # MV3 service worker and check-in execution engine
+|-- content/               # Page detector content script
+|-- icons/                 # Extension icons
+|-- lib/                   # Storage helpers and preset site definitions
+|-- popup/                 # Side panel HTML, CSS, and JavaScript
+`-- manifest.json          # Chrome extension manifest
 ```
 
 ## Installation
