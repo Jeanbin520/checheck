@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>公益站签到助手</h1>
+
+    <div class="actions">
+      <button id="checkin-all" class="btn-primary">一键签到全部</button>
+    </div>
+
+    <div id="results" class="results hidden"></div>
+
+    <div class="section">
+      <h2>站点管理</h2>
+      <div class="add-form">
+        <select id="site-select" class="site-select">
+          <option value="">-- 选择站点 --</option>
+        </select>
+        <button id="add-site" class="btn-secondary">添加</button>
+      </div>
+      <ul id="site-list" class="site-list"></ul>
+    </div>
+
+    <div class="section">
+      <h2>设置</h2>
+      <div class="setting-item">
+        <label for="close-delay">签到成功后延迟关闭 (秒):</label>
+        <input type="number" id="close-delay" min="0" max="30" value="3">
+      </div>
+    </div>
+
+    <div class="section log-section">
+      <div class="log-header">
+        <h2>运行日志</h2>
+        <div class="log-actions">
+          <button id="copy-logs" class="btn-text">复制</button>
+          <button id="clear-logs" class="btn-text">清空</button>
+        </div>
+      </div>
+      <div id="log-area" class="log-area"></div>
+    </div>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
