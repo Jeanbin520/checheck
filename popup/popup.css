@@ -188,3 +188,29 @@ h2 {
   font-size: 13px;
   text-align: center;
 }
+
+/* 定时签到设置 */
+.setting-item .schedule-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.setting-item .schedule-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.setting-item.schedule-time-row {
+  flex-wrap: wrap;
+}
+
+.setting-item input[type="time"] {
+  padding: 4px 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #333;
+}
