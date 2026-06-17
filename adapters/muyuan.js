@@ -30,14 +30,10 @@ export const muyuanAdapter = {
           waitForSelector: true
         },
         {
-          type: 'click',
-          selector: 'button, a',
-          matchText: ['linuxdo', 'linux do', 'linux.do', 'oauth', '使用linuxdo', '使用linux', '使用 linuxdo'],
-          description: 'LinuxDO 登录按钮',
+          type: 'linuxdoOAuth',
           onlyIfUrlIncludes: ['/login', '/signin'],
-          continueAfterClick: true,
-          waitAfterClickUrlIncludes: ['connect.linux.do', '/oauth', '/console'],
-          waitAfterClickTimeout: 30000
+          clientId: 'BhXQoUAlShhv8gX3J7AwTIYflzanZghI',
+          description: '进入 LinuxDO 授权登录'
         },
         {
           type: 'waitAuthorize',

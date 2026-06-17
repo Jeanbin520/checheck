@@ -1,8 +1,13 @@
-import { getSites, updateSiteStatus, getConfig } from '../lib/storage.js';
+import { getSites, updateSiteStatus, getConfig, saveConfig } from '../lib/storage.js';
 import { getAdapterForSite } from '../adapters/registry.js';
 
 const LOG_KEY = 'logs';
 const MAX_LOGS = 200;
+const ALARM_NAME = 'dailyCheckin';
+const DAY_IN_MINUTES = 24 * 60;
+
+// 防止定时签到与手动签到并发（单次签到可能耗时较长）
+let scheduledRunInProgress = false;
 
 async function log(level, message) {
   const ts = new Date().toLocaleTimeString('zh-CN');
@@ -21,6 +26,79 @@ async function log(level, message) {
 console.log('[签到助手] Service Worker 已加载');
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+
+// 根据 config 重建每日定时签到闹钟。MV3 闹钟在浏览器重启后可能失效，
+// 因此在 onInstalled / onStartup 以及用户改设置后都调用一次。
+async function scheduleAlarm() {
+  const config = await getConfig();
+  if (!config.scheduleEnabled) {
+    await chrome.alarms.clear(ALARM_NAME);
+    log('info', '定时签到已关闭，闹钟已清除');
+    return;
+  }
+
+  // 计算 scheduleTime ("HH:MM") 距离当前的分钟数；已过则顺延到明天
+  const [h, m] = String(config.scheduleTime || '09:00').split(':').map(Number);
+  const now = new Date();
+  const target = new Date(now);
+  target.setHours(h || 0, m || 0, 0, 0);
+  let delayMs = target.getTime() - now.getTime();
+  if (delayMs <= 0) delayMs += DAY_IN_MINUTES * 60 * 1000;
+  const delayInMinutes = Math.max(1, Math.round(delayMs / 60000));
+
+  await chrome.alarms.create(ALARM_NAME, {
+    delayInMinutes,
+    periodInMinutes: DAY_IN_MINUTES
+  });
+  log('info', `定时签到已启用：每日 ${config.scheduleTime}，约 ${delayInMinutes} 分钟后首次执行`);
+}
+
+// 签到完成后的桌面通知
+function notifyResults(results) {
+  const total = results.length;
+  const ok = results.filter(r => r && r.success).length;
+  const fail = total - ok;
+  const title = fail === 0 ? '✅ 定时签到完成' : (ok === 0 ? '❌ 定时签到失败' : '⚠️ 定时签到部分完成');
+  const message = `共 ${total} 个站点：成功 ${ok}，失败 ${fail}`;
+  try {
+    chrome.notifications.create({
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title,
+      message
+    });
+  } catch (err) {
+    log('error', `发送通知失败: ${err.message}`);
+  }
+}
+
+// 闹钟触发：后台静默执行全部签到
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (!alarm || alarm.name !== ALARM_NAME) return;
+  if (scheduledRunInProgress) {
+    log('warn', '定时签到触发，但上一次签到仍在进行，跳过本次');
+    return;
+  }
+  scheduledRunInProgress = true;
+  log('info', '⏰ 定时签到触发，开始执行...');
+  handleCheckinAll({ silent: true })
+    .then(results => {
+      log('info', `定时签到完成，共 ${results.length} 个站点`);
+      if (results.length > 0) notifyResults(results);
+      // 记录本次执行时间，便于排查
+      return saveConfig({ lastScheduledRun: Date.now() });
+    })
+    .catch(err => {
+      log('error', `定时签到异常: ${err.message}`);
+    })
+    .finally(() => {
+      scheduledRunInProgress = false;
+    });
+});
+
+// 浏览器启动 / 扩展安装更新时重建闹钟
+chrome.runtime.onInstalled.addListener(() => { scheduleAlarm(); });
+chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[签到助手] 收到消息:', message.action, message);
@@ -47,6 +125,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     return true;
   }
+  if (message.action === 'updateSchedule') {
+    // popup 改完定时设置后通知后台立即重同步闹钟
+    scheduleAlarm()
+      .then(() => sendResponse({ ok: true }))
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
   if (message.action === 'detectedCheckin') {
     chrome.storage.session.set({
       [`detected:${message.url}`]: {
@@ -66,7 +151,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function handleCheckinAll() {
+async function handleCheckinAll(options = {}) {
   const sites = await getSites();
   log('info', `共有 ${sites.length} 个站点`);
 
@@ -79,7 +164,7 @@ async function handleCheckinAll() {
 
   for (const site of sites) {
     log('info', `正在签到: ${site.name} (${site.url})`);
-    const result = await doCheckin(site);
+    const result = await doCheckin(site, options);
     log(result.success ? 'info' : 'error', `${site.name}: ${result.message}`);
     results.push(result);
   }
@@ -94,7 +179,7 @@ async function handleCheckinSingle(siteId) {
   return doCheckin(site);
 }
 
-async function doCheckin(site) {
+async function doCheckin(site, options = {}) {
   log('info', `开始签到: ${site.name}`);
   const adapter = getAdapterForSite(site);
   if (!adapter) {
@@ -106,20 +191,22 @@ async function doCheckin(site) {
   log('info', `使用适配器: ${adapter.name}`);
 
   if (adapter.getFlow) {
-    return doFlowCheckin(site, adapter);
+    return doFlowCheckin(site, adapter, options);
   }
 
   return doSimpleCheckin(site, adapter);
 }
 
-async function doFlowCheckin(site, adapter) {
+async function doFlowCheckin(site, adapter, options = {}) {
+  const silent = !!options.silent;
   const flow = adapter.getFlow();
-  log('info', `流程签到: ${site.name}, URL: ${flow.url}`);
+  log('info', `流程签到: ${site.name}, URL: ${flow.url}${silent ? '（后台静默）' : ''}`);
 
   let tab;
   let shouldCloseTab = true;
   try {
-    tab = await chrome.tabs.create({ url: flow.url, active: true });
+    // silent（定时触发）时后台打开，不打扰当前浏览；手动点击时前台显示
+    tab = await chrome.tabs.create({ url: flow.url, active: !silent });
     log('info', `标签页已创建: ${tab.id}`);
 
     await waitForTabLoad(tab.id, 30000);
@@ -1143,7 +1230,8 @@ async function doFlowCheckin(site, adapter) {
             results = await chrome.scripting.executeScript({
               target: { tabId: tab.id },
               world: step.world || 'ISOLATED',
-              func: step.func
+              func: step.func,
+              args: step.args || []
             });
             break;
           } catch (injectErr) {

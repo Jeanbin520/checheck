@@ -153,8 +153,8 @@ $('#checkin-all').addEventListener('click', async () => {
 
     const results = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error('Service Worker 响应超时(30s)，请检查扩展是否正常加载'));
-      }, 30000);
+        reject(new Error('Service Worker 响应超时(120s)，请检查扩展是否正常加载'));
+      }, 120000);
 
       chrome.runtime.sendMessage({ action: 'checkinAll' }, (response) => {
         clearTimeout(timer);
@@ -249,6 +249,17 @@ $('#copy-logs').addEventListener('click', async () => {
   }
 });
 
+// 通知后台根据最新配置重同步定时闹钟
+function syncSchedule() {
+  try {
+    chrome.runtime.sendMessage({ action: 'updateSchedule' }, () => {
+      void chrome.runtime.lastError;
+    });
+  } catch (e) {
+    void e;
+  }
+}
+
 async function renderConfig() {
   const config = await getConfig();
   const input = $('#close-delay');
@@ -263,6 +274,24 @@ async function renderConfig() {
       input.value = 30;
     }
     await saveConfig({ closeDelay: parseInt(input.value, 10) });
+  });
+
+  // 定时自动签到开关
+  const scheduleEnabled = $('#schedule-enabled');
+  scheduleEnabled.checked = !!config.scheduleEnabled;
+  scheduleEnabled.addEventListener('change', async () => {
+    await saveConfig({ scheduleEnabled: scheduleEnabled.checked });
+    syncSchedule();
+  });
+
+  // 每日执行时间
+  const scheduleTime = $('#schedule-time');
+  scheduleTime.value = config.scheduleTime || '09:00';
+  scheduleTime.addEventListener('change', async () => {
+    const value = scheduleTime.value || '09:00';
+    await saveConfig({ scheduleTime: value });
+    // 仅在开关已开启时才需要重同步闹钟
+    if (scheduleEnabled.checked) syncSchedule();
   });
 }
 
