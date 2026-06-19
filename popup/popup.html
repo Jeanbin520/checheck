@@ -6,52 +6,132 @@
 </head>
 <body>
   <div class="container">
-    <h1>公益站签到助手</h1>
+    <h1>佬站助手</h1>
 
-    <div class="actions">
-      <button id="checkin-all" class="btn-primary">一键签到全部</button>
+    <div class="tab-list" role="tablist" aria-label="功能">
+      <button id="tab-reading" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="reading-panel" data-tab-target="reading-panel">LinuxDO 阅读</button>
+      <button id="tab-checkin" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="checkin-panel" data-tab-target="checkin-panel">公益站签到</button>
     </div>
 
-    <div id="results" class="results hidden"></div>
+    <div id="checkin-panel" class="tab-panel" role="tabpanel" aria-labelledby="tab-checkin" hidden>
+      <div class="actions">
+        <button id="checkin-all" class="btn-primary">一键签到全部</button>
+      </div>
 
-    <div class="section">
-      <h2>站点管理</h2>
-      <div class="add-form">
-        <select id="site-select" class="site-select">
-          <option value="">-- 选择站点 --</option>
-        </select>
-        <button id="add-site" class="btn-secondary">添加</button>
-      </div>
-      <ul id="site-list" class="site-list"></ul>
-    </div>
+      <div id="results" class="results hidden"></div>
 
-    <div class="section">
-      <h2>设置</h2>
-      <div class="setting-item">
-        <label for="close-delay">签到成功后延迟关闭 (秒):</label>
-        <input type="number" id="close-delay" min="0" max="30" value="3">
+      <div id="site-management-section" class="section">
+        <h2>站点管理</h2>
+        <div class="add-form">
+          <select id="site-select" class="site-select">
+            <option value="">-- 选择站点 --</option>
+          </select>
+          <button id="add-site" class="btn-secondary">添加</button>
+        </div>
+        <ul id="site-list" class="site-list"></ul>
       </div>
-      <div class="setting-item">
-        <label for="schedule-enabled" class="schedule-toggle">
-          <input type="checkbox" id="schedule-enabled">
-          定时自动签到
-        </label>
-      </div>
-      <div class="setting-item schedule-time-row">
-        <label for="schedule-time">每日执行时间:</label>
-        <input type="time" id="schedule-time" value="09:00">
-      </div>
-    </div>
 
-    <div class="section log-section">
-      <div class="log-header">
-        <h2>运行日志</h2>
-        <div class="log-actions">
-          <button id="copy-logs" class="btn-text">复制</button>
-          <button id="clear-logs" class="btn-text">清空</button>
+      <div class="section">
+        <h2>设置</h2>
+        <div class="setting-item">
+          <label for="close-delay">签到成功后延迟关闭 (秒):</label>
+          <input type="number" id="close-delay" min="0" max="30" value="3">
+        </div>
+        <div class="setting-item">
+          <label for="schedule-enabled" class="schedule-toggle">
+            <input type="checkbox" id="schedule-enabled">
+            定时自动签到
+          </label>
+        </div>
+        <div class="setting-item schedule-time-row">
+          <label for="schedule-time">每日执行时间:</label>
+          <input type="time" id="schedule-time" value="09:00">
         </div>
       </div>
-      <div id="log-area" class="log-area"></div>
+
+      <div class="section log-section">
+        <div class="log-header">
+          <h2>运行日志</h2>
+          <div class="log-actions">
+            <button id="copy-logs" class="btn-text">复制</button>
+            <button id="clear-logs" class="btn-text">清空</button>
+          </div>
+        </div>
+        <div id="log-area" class="log-area"></div>
+      </div>
+    </div>
+
+    <div id="reading-panel" class="tab-panel active" role="tabpanel" aria-labelledby="tab-reading">
+      <div class="section ldc-section">
+        <div class="ldc-header">
+          <div>
+            <h2>LDC 状态</h2>
+            <p id="ldc-status" class="reading-status">尚未刷新</p>
+          </div>
+        </div>
+
+        <div class="ldc-metrics">
+          <div class="ldc-metric">
+            <span>可用 LINUX DO Credits</span>
+            <strong id="ldc-available">--</strong>
+          </div>
+          <div class="ldc-metric">
+            <span id="ldc-seven-day-label">7 天收入（昨日收入：--）</span>
+            <strong id="ldc-seven-day">--</strong>
+          </div>
+        </div>
+
+        <div class="ldc-actions">
+          <button id="ldc-refresh" class="btn-secondary" type="button">刷新</button>
+          <button id="ldc-open" class="btn-secondary" type="button">打开 LDC 页面</button>
+        </div>
+      </div>
+
+      <div class="section reading-section">
+        <div class="reading-title-row">
+          <div>
+            <h2>LinuxDO 阅读助手</h2>
+            <p id="linuxdo-reading-status" class="reading-status">正在读取状态...</p>
+          </div>
+          <label class="reading-switch" title="打开后会在当前 LinuxDO 主题页慢速滚动">
+            <input id="linuxdo-reading-enabled" type="checkbox">
+            <span></span>
+          </label>
+        </div>
+
+        <div class="reading-controls">
+          <label for="linuxdo-reading-speed">速度</label>
+          <select id="linuxdo-reading-speed">
+            <option value="randomSlow">随机慢</option>
+            <option value="slow">慢</option>
+            <option value="normal">正常</option>
+            <option value="fast">快</option>
+          </select>
+
+          <label for="linuxdo-reading-max-minutes">最长时间</label>
+          <select id="linuxdo-reading-max-minutes">
+            <option value="3">3 分钟</option>
+            <option value="5">5 分钟</option>
+            <option value="8">8 分钟</option>
+            <option value="12">12 分钟</option>
+            <option value="20">20 分钟</option>
+            <option value="30">30 分钟</option>
+            <option value="60">60 分钟</option>
+            <option value="90">90 分钟</option>
+            <option value="120">120 分钟</option>
+          </select>
+        </div>
+
+        <label class="reading-check">
+          <input id="linuxdo-reading-pause" type="checkbox">
+          <span>手动操作时暂停</span>
+        </label>
+
+        <div class="reading-actions">
+          <button id="linuxdo-reading-start" class="btn-secondary" type="button">开始</button>
+          <button id="linuxdo-reading-stop" class="btn-secondary" type="button">停止</button>
+        </div>
+      </div>
     </div>
   </div>
   <script type="module" src="popup.js"></script>

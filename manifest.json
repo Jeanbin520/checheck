@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "公益站签到助手",
+  "name": "佬站助手",
   "version": "1.0.0",
-  "description": "一键签到基于 new-api 的公益站点",
+  "description": "一键签到基于 new-api 的公益站点，并辅助 LinuxDO 主题阅读",
   "permissions": [
     "storage",
     "tabs",
@@ -16,6 +16,7 @@
     "<all_urls>"
   ],
   "action": {
+    "default_title": "佬站助手",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
@@ -38,6 +39,11 @@
     {
       "matches": ["<all_urls>"],
       "js": ["content/injector.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://linux.do/*"],
+      "js": ["content/linuxdo-reading-helper.js"],
       "run_at": "document_idle"
     }
   ]

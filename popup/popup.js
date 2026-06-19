@@ -2,6 +2,40 @@ import { getSites, addSite, removeSite, getConfig, saveConfig } from '../lib/sto
 import { PRESET_SITES } from '../lib/preset-sites.js';
 
 const $ = (sel) => document.querySelector(sel);
+const LINUXDO_READING_STORAGE_KEY = 'linuxdoReadingHelper';
+const LINUXDO_READING_DEFAULTS = {
+  speed: 'normal',
+  maxMinutes: 8,
+  pauseOnUserInput: true
+};
+const LINUXDO_READING_UI_DEFAULTS = {
+  enabled: false,
+  ...LINUXDO_READING_DEFAULTS
+};
+const LINUXDO_READING_STATUS_LABELS = {
+  idle: '待机中',
+  started: '已开始',
+  reading: '正在慢速滚动',
+  'reading-marker-visible': '检测到蓝点，继续阅读',
+  'paused-by-user': '检测到手动操作，短暂停顿',
+  completed: '已完成，本页蓝点已消失',
+  stopped: '已停止',
+  disabled: '已关闭',
+  'not-topic-page': '请在 linux.do 主题页使用',
+  'time-limit': '已达到最长时间限制'
+};
+const LINUXDO_READING_STOPPED_STATUSES = new Set([
+  'completed',
+  'stopped',
+  'disabled',
+  'not-topic-page',
+  'time-limit'
+]);
+const LDC_CREDIT_STORAGE_KEY = 'ldcCredit';
+
+let linuxdoReadingActiveTabId = null;
+let linuxdoReadingActiveTabUrl = '';
+let linuxdoReadingSettings = { ...LINUXDO_READING_UI_DEFAULTS };
 
 async function renderSites() {
   const sites = await getSites();
@@ -59,6 +93,9 @@ async function renderDropdown() {
 }
 
 async function renderDetected() {
+  const existing = $('#detected-sites-section');
+  if (existing) existing.remove();
+
   const items = await chrome.storage.session.get(null);
   const detected = Object.values(items)
     .filter(v => v.detectedAt && Date.now() - v.detectedAt < 3600000)
@@ -67,6 +104,7 @@ async function renderDetected() {
   if (detected.length === 0) return;
 
   const section = document.createElement('div');
+  section.id = 'detected-sites-section';
   section.className = 'section';
   section.innerHTML = `<h2>检测到的签到站点</h2>`;
 
@@ -83,7 +121,8 @@ async function renderDetected() {
     section.appendChild(div);
   }
 
-  document.querySelector('.section').before(section);
+  const anchor = $('#site-management-section') || $('#checkin-panel .section');
+  if (anchor) anchor.before(section);
 
   section.querySelectorAll('.add-detected').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -99,6 +138,353 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+function setActiveTab(panelId) {
+  const buttons = document.querySelectorAll('.tab-button');
+  const panels = document.querySelectorAll('.tab-panel');
+
+  buttons.forEach(button => {
+    const active = button.dataset.tabTarget === panelId;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+
+  panels.forEach(panel => {
+    const active = panel.id === panelId;
+    panel.classList.toggle('active', active);
+    panel.hidden = !active;
+  });
+
+  if (panelId === 'reading-panel') {
+    refreshLinuxdoReadingHelper();
+    loadStoredLdcCredit();
+  }
+  if (panelId === 'checkin-panel') {
+    renderLogs();
+  }
+}
+
+function initTabs() {
+  document.querySelectorAll('.tab-button').forEach(button => {
+    button.addEventListener('click', () => {
+      setActiveTab(button.dataset.tabTarget);
+    });
+  });
+}
+
+function getLdcElements() {
+  return {
+    statusText: $('#ldc-status'),
+    availableText: $('#ldc-available'),
+    sevenDayLabel: $('#ldc-seven-day-label'),
+    sevenDayText: $('#ldc-seven-day'),
+    refreshButton: $('#ldc-refresh'),
+    openButton: $('#ldc-open')
+  };
+}
+
+function formatLdcMetric(value) {
+  const text = value == null ? '' : String(value).trim();
+  return text || '--';
+}
+
+function formatLdcTime(timestamp) {
+  if (!timestamp) return '';
+  try {
+    return new Date(timestamp).toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  } catch {
+    return '';
+  }
+}
+
+function renderLdcCredit(state) {
+  const { statusText, availableText, sevenDayLabel, sevenDayText } = getLdcElements();
+  if (!statusText || !availableText || !sevenDayLabel || !sevenDayText) return;
+
+  if (!state) {
+    statusText.textContent = '尚未刷新';
+    availableText.textContent = '--';
+    sevenDayLabel.textContent = '7 天收入（昨日收入：--）';
+    sevenDayText.textContent = '--';
+    return;
+  }
+
+  availableText.textContent = formatLdcMetric(state.availableLdc);
+  sevenDayLabel.textContent = `7 天收入（昨日收入：${formatLdcMetric(state.yesterdayIncome)}）`;
+  sevenDayText.textContent = formatLdcMetric(state.sevenDayIncome);
+
+  const timeText = formatLdcTime(state.updatedAt);
+  const message = state.message || (state.ok ? '已刷新' : '读取失败');
+  statusText.textContent = timeText ? `${message} · ${timeText}` : message;
+}
+
+async function loadStoredLdcCredit() {
+  const result = await chrome.storage.local.get(LDC_CREDIT_STORAGE_KEY);
+  renderLdcCredit(result[LDC_CREDIT_STORAGE_KEY]);
+}
+
+function sendRuntimeMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+async function refreshLdcCredit() {
+  const { refreshButton, statusText } = getLdcElements();
+  if (refreshButton) {
+    refreshButton.disabled = true;
+    refreshButton.textContent = '刷新中...';
+  }
+  if (statusText) statusText.textContent = '正在读取 credit.linux.do...';
+
+  try {
+    const response = await sendRuntimeMessage({ action: 'refreshLdcCredit' });
+    renderLdcCredit(response);
+  } catch (error) {
+    renderLdcCredit({
+      ok: false,
+      message: `读取失败: ${error.message}`,
+      updatedAt: Date.now()
+    });
+  } finally {
+    if (refreshButton) {
+      refreshButton.disabled = false;
+      refreshButton.textContent = '刷新';
+    }
+  }
+}
+
+async function openLdcCreditPage() {
+  const { openButton, statusText } = getLdcElements();
+  if (openButton) openButton.disabled = true;
+  if (statusText) statusText.textContent = '正在打开 LDC 页面...';
+
+  try {
+    await sendRuntimeMessage({ action: 'openLdcCredit' });
+    const result = await chrome.storage.local.get(LDC_CREDIT_STORAGE_KEY);
+    renderLdcCredit(result[LDC_CREDIT_STORAGE_KEY] || {
+      ok: false,
+      message: '已打开 LDC 页面',
+      updatedAt: Date.now()
+    });
+  } catch (error) {
+    renderLdcCredit({
+      ok: false,
+      message: `打开失败: ${error.message}`,
+      updatedAt: Date.now()
+    });
+  } finally {
+    if (openButton) openButton.disabled = false;
+  }
+}
+
+function initLdcCreditTools() {
+  const { refreshButton, openButton } = getLdcElements();
+  if (refreshButton) refreshButton.addEventListener('click', refreshLdcCredit);
+  if (openButton) openButton.addEventListener('click', openLdcCreditPage);
+  loadStoredLdcCredit();
+}
+
+function getLinuxdoReadingElements() {
+  return {
+    enabledInput: $('#linuxdo-reading-enabled'),
+    speedInput: $('#linuxdo-reading-speed'),
+    maxMinutesInput: $('#linuxdo-reading-max-minutes'),
+    pauseInput: $('#linuxdo-reading-pause'),
+    startButton: $('#linuxdo-reading-start'),
+    stopButton: $('#linuxdo-reading-stop'),
+    statusText: $('#linuxdo-reading-status')
+  };
+}
+
+function isLinuxdoUrl(url) {
+  return /^https:\/\/linux\.do\//.test(url || '');
+}
+
+function setLinuxdoReadingStatus(status, fallback) {
+  const { enabledInput, statusText } = getLinuxdoReadingElements();
+  if (statusText) {
+    statusText.textContent = LINUXDO_READING_STATUS_LABELS[status] || fallback || '状态未知';
+  }
+
+  if (enabledInput && LINUXDO_READING_STOPPED_STATUSES.has(status)) {
+    enabledInput.checked = false;
+    linuxdoReadingSettings.enabled = false;
+  }
+}
+
+function setLinuxdoReadingButtonsEnabled(enabled) {
+  const { enabledInput, startButton, stopButton } = getLinuxdoReadingElements();
+  if (enabledInput) enabledInput.disabled = !enabled;
+  if (startButton) startButton.disabled = !enabled;
+  if (stopButton) stopButton.disabled = !enabled;
+}
+
+function readLinuxdoReadingForm() {
+  const { enabledInput, speedInput, maxMinutesInput, pauseInput } = getLinuxdoReadingElements();
+  return {
+    enabled: !!enabledInput?.checked,
+    speed: speedInput?.value || LINUXDO_READING_DEFAULTS.speed,
+    maxMinutes: Number(maxMinutesInput?.value || LINUXDO_READING_DEFAULTS.maxMinutes),
+    pauseOnUserInput: pauseInput?.checked !== false
+  };
+}
+
+function writeLinuxdoReadingForm(nextSettings) {
+  const { enabledInput, speedInput, maxMinutesInput, pauseInput } = getLinuxdoReadingElements();
+  linuxdoReadingSettings = { ...LINUXDO_READING_UI_DEFAULTS, ...(nextSettings || {}) };
+  if (enabledInput) enabledInput.checked = !!linuxdoReadingSettings.enabled;
+  if (speedInput) speedInput.value = linuxdoReadingSettings.speed;
+  if (maxMinutesInput) maxMinutesInput.value = String(linuxdoReadingSettings.maxMinutes);
+  if (pauseInput) pauseInput.checked = linuxdoReadingSettings.pauseOnUserInput !== false;
+}
+
+function sendLinuxdoReadingMessage(message) {
+  if (!linuxdoReadingActiveTabId) return Promise.reject(new Error('No active tab'));
+  return chrome.tabs.sendMessage(linuxdoReadingActiveTabId, message);
+}
+
+async function ensureLinuxdoReadingContentScript() {
+  if (!linuxdoReadingActiveTabId || !isLinuxdoUrl(linuxdoReadingActiveTabUrl)) {
+    throw new Error('当前标签页不是 linux.do 页面');
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId: linuxdoReadingActiveTabId },
+    files: ['content/linuxdo-reading-helper.js']
+  });
+}
+
+async function sendLinuxdoReadingMessageWithInjection(message) {
+  try {
+    return await sendLinuxdoReadingMessage(message);
+  } catch (error) {
+    await ensureLinuxdoReadingContentScript();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return sendLinuxdoReadingMessage(message);
+  }
+}
+
+async function saveLinuxdoReadingSettings(nextSettings) {
+  linuxdoReadingSettings = { ...linuxdoReadingSettings, ...nextSettings };
+  const persistentSettings = {
+    speed: linuxdoReadingSettings.speed,
+    maxMinutes: linuxdoReadingSettings.maxMinutes,
+    pauseOnUserInput: linuxdoReadingSettings.pauseOnUserInput
+  };
+
+  await chrome.storage.local.set({ [LINUXDO_READING_STORAGE_KEY]: persistentSettings });
+
+  if (!linuxdoReadingActiveTabId || !isLinuxdoUrl(linuxdoReadingActiveTabUrl)) {
+    setLinuxdoReadingStatus('not-topic-page');
+    return;
+  }
+
+  try {
+    const response = await sendLinuxdoReadingMessageWithInjection({
+      type: 'linuxdo-reading-helper-save-settings',
+      settings: linuxdoReadingSettings
+    });
+    if (response?.settings) {
+      writeLinuxdoReadingForm({ ...response.settings, enabled: linuxdoReadingSettings.enabled });
+    }
+    setLinuxdoReadingStatus(response?.status);
+  } catch (error) {
+    setLinuxdoReadingStatus('not-topic-page');
+  }
+}
+
+async function refreshLinuxdoReadingHelper() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+  linuxdoReadingActiveTabId = tab ? tab.id : null;
+  linuxdoReadingActiveTabUrl = tab ? tab.url || '' : '';
+
+  const stored = await chrome.storage.local.get({
+    [LINUXDO_READING_STORAGE_KEY]: LINUXDO_READING_DEFAULTS
+  });
+  writeLinuxdoReadingForm({
+    ...stored[LINUXDO_READING_STORAGE_KEY],
+    enabled: false
+  });
+
+  if (!tab || !isLinuxdoUrl(tab.url)) {
+    setLinuxdoReadingButtonsEnabled(false);
+    setLinuxdoReadingStatus('not-topic-page');
+    return;
+  }
+
+  try {
+    const response = await sendLinuxdoReadingMessageWithInjection({
+      type: 'linuxdo-reading-helper-get-status'
+    });
+    if (response?.ok) {
+      writeLinuxdoReadingForm({
+        ...response.settings,
+        enabled: response.running
+      });
+      setLinuxdoReadingButtonsEnabled(!!response.isTopicPage);
+      setLinuxdoReadingStatus(response.isTopicPage ? response.status : 'not-topic-page');
+      return;
+    }
+  } catch (error) {
+    // Fall through to the disabled state below.
+  }
+
+  setLinuxdoReadingButtonsEnabled(false);
+  setLinuxdoReadingStatus('not-topic-page');
+}
+
+function initLinuxdoReadingHelper() {
+  const {
+    enabledInput,
+    speedInput,
+    maxMinutesInput,
+    pauseInput,
+    startButton,
+    stopButton
+  } = getLinuxdoReadingElements();
+
+  if (!enabledInput || !speedInput || !maxMinutesInput || !pauseInput || !startButton || !stopButton) {
+    return;
+  }
+
+  enabledInput.addEventListener('change', () => saveLinuxdoReadingSettings(readLinuxdoReadingForm()));
+  speedInput.addEventListener('change', () => saveLinuxdoReadingSettings(readLinuxdoReadingForm()));
+  maxMinutesInput.addEventListener('change', () => saveLinuxdoReadingSettings(readLinuxdoReadingForm()));
+  pauseInput.addEventListener('change', () => saveLinuxdoReadingSettings(readLinuxdoReadingForm()));
+
+  startButton.addEventListener('click', async () => {
+    enabledInput.checked = true;
+    await saveLinuxdoReadingSettings({ ...readLinuxdoReadingForm(), enabled: true });
+  });
+
+  stopButton.addEventListener('click', async () => {
+    enabledInput.checked = false;
+    await saveLinuxdoReadingSettings({ ...readLinuxdoReadingForm(), enabled: false });
+  });
+
+  chrome.runtime.onMessage.addListener((message, sender) => {
+    if (!message || message.type !== 'linuxdo-reading-helper-status') return;
+    if (sender?.tab?.id && linuxdoReadingActiveTabId && sender.tab.id !== linuxdoReadingActiveTabId) {
+      return;
+    }
+    setLinuxdoReadingStatus(message.status);
+  });
+
+  refreshLinuxdoReadingHelper();
 }
 
 $('#add-site').addEventListener('click', async () => {
@@ -296,9 +682,12 @@ async function renderConfig() {
 }
 
 console.log('[签到助手] Side Panel 已加载');
+initTabs();
 renderSites();
 renderDropdown();
 renderDetected();
 renderLogs();
 renderConfig();
+initLinuxdoReadingHelper();
+initLdcCreditTools();
 setInterval(renderLogs, 2000);
