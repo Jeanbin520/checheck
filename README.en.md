@@ -1,19 +1,21 @@
-# Public Welfare Site Check-in Assistant
+# 佬站助手
 
 [简体中文](README.md) | [English](README.en.md)
 
-A Chrome Manifest V3 extension for managing a small set of supported public welfare sites and running daily check-ins from one side panel.
+A Chrome Manifest V3 extension for managing a small set of supported public welfare sites, running daily check-ins from one side panel, assisting LinuxDO topic reading, and checking LDC status.
 
 The extension is designed for sites based on `new-api` and for sites that use LinuxDO OAuth login. It provides preset site entries, one-click check-in, runtime logs, and adapter-based automation for site-specific login and check-in flows.
 
 ## Features
 
-- Chrome MV3 extension with a side panel UI.
+- Chrome MV3 extension with a side panel UI split into LinuxDO reading and check-in tabs.
 - One-click daily check-in for all saved sites.
 - Preset supported sites, with the option to add detected sites.
 - Site-specific adapters for more reliable automation.
 - Fallback `new-api` adapter for simple check-in pages.
 - LinuxDO OAuth flow support for supported sites.
+- Slow scrolling on the current LinuxDO topic page until the unread marker clears or the time limit is reached.
+- LinuxDO LDC status card in the side panel, including available LINUX DO Credits, 7-day income, and yesterday's income.
 - Runtime logs stored locally for debugging and review.
 - Configurable delay before closing a tab after a successful check-in.
 
@@ -40,7 +42,7 @@ Current adapters:
 .
 |-- adapters/              # Site-specific and fallback check-in adapters
 |-- background/            # MV3 service worker and check-in execution engine
-|-- content/               # Page detector content script
+|-- content/               # Page detector and LinuxDO reading-helper content scripts
 |-- icons/                 # Extension icons
 |-- lib/                   # Storage helpers and preset site definitions
 |-- popup/                 # Side panel HTML, CSS, and JavaScript
@@ -70,7 +72,7 @@ For automation-heavy sites, prefer robust DOM, URL, and API state checks over as
 
 ## Privacy
 
-Check-in state, site configuration, and runtime logs are stored locally through Chrome storage. The extension does not include a backend service.
+Check-in state, site configuration, runtime logs, LinuxDO reading-helper settings, and the latest LDC result are stored locally through Chrome storage. The extension does not include a backend service.
 
 ## Status
 

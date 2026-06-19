@@ -1,20 +1,22 @@
-# 公益站签到助手
+# 佬站助手
 
 [简体中文](README.md) | [English](README.en.md)
 
-一个 Chrome Manifest V3 扩展，用于管理少量支持的公益站点，并在侧边栏中执行每日一键签到。
+一个 Chrome Manifest V3 扩展，用于管理少量支持的公益站点，并在侧边栏中执行每日一键签到，同时提供 LinuxDO 主题阅读助手和 LDC 状态查看。
 
 本扩展主要面向基于 `new-api` 的公益站点，以及使用 LinuxDO OAuth 登录的站点。它提供预设站点、一键签到、运行日志和基于适配器的站点自动化流程。
 
 ## 功能特性
 
 - 基于 Chrome MV3 的浏览器扩展。
-- 使用侧边栏作为主要操作界面。
+- 使用侧边栏作为主要操作界面，分为 LinuxDO 阅读和公益站签到两个标签页。
 - 支持对已保存站点执行一键签到。
 - 内置预设站点，也可以添加检测到的站点。
 - 使用站点专属适配器提升自动化稳定性。
 - 提供 `new-api` 通用 fallback 适配器。
 - 支持部分站点的 LinuxDO OAuth 登录流程。
+- 支持在当前 LinuxDO 主题页慢速滚动阅读，直到未读蓝点消失或达到时间上限。
+- 支持在侧边栏查看 LinuxDO LDC 状态，包括可用 LINUX DO Credits、7 天收入和昨日收入。
 - 运行日志保存在本地，便于排查签到过程。
 - 可配置签到成功后的标签页延迟关闭时间。
 
@@ -41,7 +43,7 @@
 .
 |-- adapters/              # 站点专属和通用 fallback 签到适配器
 |-- background/            # MV3 service worker 与签到执行引擎
-|-- content/               # 页面检测 content script
+|-- content/               # 页面检测与 LinuxDO 阅读助手 content scripts
 |-- icons/                 # 扩展图标
 |-- lib/                   # 存储封装和预设站点定义
 |-- popup/                 # 侧边栏 HTML、CSS 和 JavaScript
@@ -71,7 +73,7 @@
 
 ## 隐私说明
 
-站点配置、签到状态和运行日志都通过 Chrome storage 保存在本地。项目不包含后端服务。
+站点配置、签到状态、运行日志、LinuxDO 阅读助手设置和最近一次 LDC 读取结果都通过 Chrome storage 保存在本地。项目不包含后端服务。
 
 ## 项目状态
 

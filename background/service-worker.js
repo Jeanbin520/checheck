@@ -5,6 +5,8 @@ const LOG_KEY = 'logs';
 const MAX_LOGS = 200;
 const ALARM_NAME = 'dailyCheckin';
 const DAY_IN_MINUTES = 24 * 60;
+const LDC_CREDIT_KEY = 'ldcCredit';
+const LDC_CREDIT_HOME_URL = 'https://credit.linux.do/home';
 
 // 防止定时签到与手动签到并发（单次签到可能耗时较长）
 let scheduledRunInProgress = false;
@@ -101,6 +103,8 @@ chrome.runtime.onInstalled.addListener(() => { scheduleAlarm(); });
 chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || !message.action) return false;
+
   console.log('[签到助手] 收到消息:', message.action, message);
 
   if (message.action === 'checkinAll') {
@@ -132,6 +136,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(err => sendResponse({ ok: false, message: err.message }));
     return true;
   }
+  if (message.action === 'refreshLdcCredit') {
+    refreshLdcCredit()
+      .then(sendResponse)
+      .catch(async err => {
+        const result = {
+          ok: false,
+          status: 'error',
+          message: `读取 LDC 失败: ${err.message}`,
+          updatedAt: Date.now()
+        };
+        await chrome.storage.local.set({ [LDC_CREDIT_KEY]: result });
+        sendResponse(result);
+      });
+    return true;
+  }
+  if (message.action === 'openLdcCredit') {
+    openLdcCreditPage()
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
   if (message.action === 'detectedCheckin') {
     chrome.storage.session.set({
       [`detected:${message.url}`]: {
@@ -150,6 +175,428 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 });
+
+async function findLdcCreditTab() {
+  const tabs = await chrome.tabs.query({ url: ['https://credit.linux.do/*'] });
+  return tabs.find(tab => tab.id && tab.url && !tab.url.includes('/cdn-cgi/')) || tabs[0] || null;
+}
+
+async function focusTab(tab) {
+  if (!tab || !tab.id) return;
+  await chrome.tabs.update(tab.id, { active: true });
+  if (tab.windowId) {
+    try { await chrome.windows.update(tab.windowId, { focused: true }); } catch {}
+  }
+}
+
+async function openLdcCreditPage() {
+  let tab = await findLdcCreditTab();
+  if (tab?.id) {
+    tab = await chrome.tabs.update(tab.id, { url: LDC_CREDIT_HOME_URL, active: true });
+    await focusTab(tab);
+    return { ok: true, message: '已打开 LDC 页面', url: tab.url || LDC_CREDIT_HOME_URL };
+  }
+
+  tab = await chrome.tabs.create({ url: LDC_CREDIT_HOME_URL, active: true });
+  return { ok: true, message: '已打开 LDC 页面', url: tab.url || LDC_CREDIT_HOME_URL };
+}
+
+function waitForTabLoadQuiet(tabId, timeout = 30000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let stableTimer = null;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (stableTimer) clearTimeout(stableTimer);
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+
+    const timer = setTimeout(finish, timeout);
+
+    const listener = (id, info) => {
+      if (id !== tabId) return;
+      if (info.status === 'loading' && stableTimer) {
+        clearTimeout(stableTimer);
+        stableTimer = null;
+      }
+      if (info.status === 'complete') {
+        if (stableTimer) clearTimeout(stableTimer);
+        stableTimer = setTimeout(finish, 1200);
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId)
+      .then(tab => {
+        if (tab.status === 'complete') {
+          stableTimer = setTimeout(finish, 800);
+        }
+      })
+      .catch(finish);
+  });
+}
+
+async function refreshLdcCredit() {
+  let tab = await findLdcCreditTab();
+  let createdTab = false;
+
+  if (!tab?.id) {
+    tab = await chrome.tabs.create({ url: LDC_CREDIT_HOME_URL, active: false });
+    createdTab = true;
+  } else if (!tab.url || !tab.url.includes('/home')) {
+    tab = await chrome.tabs.update(tab.id, { url: LDC_CREDIT_HOME_URL, active: false });
+  }
+
+  await waitForTabLoadQuiet(tab.id, 35000);
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: scrapeLdcCreditPage
+  });
+
+  const currentTab = await chrome.tabs.get(tab.id).catch(() => tab);
+  const result = {
+    ...(results?.[0]?.result || {
+      ok: false,
+      status: 'no-response',
+      message: 'LDC 页面没有返回可读取结果'
+    }),
+    url: currentTab?.url || tab.url || LDC_CREDIT_HOME_URL,
+    updatedAt: Date.now()
+  };
+
+  await chrome.storage.local.set({ [LDC_CREDIT_KEY]: result });
+
+  if (result.ok && createdTab) {
+    try { await chrome.tabs.remove(tab.id); } catch {}
+  }
+
+  if (!result.ok && currentTab?.id) {
+    await focusTab(currentTab);
+  }
+
+  return result;
+}
+
+function scrapeLdcCreditPage() {
+  const url = location.href;
+  const title = document.title || '';
+  const body = document.body;
+  const bodyText = (body?.innerText || '').replace(/\r/g, '').trim();
+  const lowerText = bodyText.toLowerCase();
+  const lowerTitle = title.toLowerCase();
+
+  if (
+    lowerTitle.includes('just a moment') ||
+    lowerText.includes('enable javascript and cookies') ||
+    lowerText.includes('checking your browser') ||
+    lowerText.includes('checking if the site connection is secure')
+  ) {
+    return {
+      ok: false,
+      status: 'cloudflare',
+      message: '需要先在 LDC 页面完成 Cloudflare 验证'
+    };
+  }
+
+  if (
+    location.pathname.includes('/login') ||
+    (/(sign in|login|登录|登入)/i.test(bodyText) && /(linux|oauth|callbackurl)/i.test(bodyText + url))
+  ) {
+    return {
+      ok: false,
+      status: 'login-required',
+      message: '需要先登录 credit.linux.do'
+    };
+  }
+
+  function isVisible(element) {
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return rect.width > 0 &&
+      rect.height > 0 &&
+      style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      Number(style.opacity || 1) > 0.05;
+  }
+
+  function textOf(element) {
+    return (element?.innerText || element?.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function compact(text) {
+    return String(text || '').toLowerCase().replace(/\s+/g, '').replace(/[：:]/g, '');
+  }
+
+  function containsAnyLabel(text, labels) {
+    const lower = String(text || '').toLowerCase();
+    const compactText = compact(text);
+    return labels.some(label => lower.includes(label.toLowerCase()) || compactText.includes(compact(label)));
+  }
+
+  function extractNumbers(text, ignorePlainSeven) {
+    const matches = String(text || '').match(/[+-]?\d[\d,]*(?:\.\d+)?/g) || [];
+    return matches
+      .map(value => value.trim())
+      .filter(value => {
+        if (!ignorePlainSeven) return true;
+        return value.replace(/[,+]/g, '') !== '7';
+      });
+  }
+
+  function numberAfterLabel(text, labels, ignorePlainSeven) {
+    const lower = String(text || '').toLowerCase();
+    for (const label of labels) {
+      const index = lower.indexOf(label.toLowerCase());
+      if (index < 0) continue;
+      const after = String(text).slice(index + label.length, index + label.length + 100);
+      const values = extractNumbers(after, ignorePlainSeven);
+      if (values.length) return values[0];
+    }
+    return '';
+  }
+
+  function metricFromElement(element, labels, ignorePlainSeven) {
+    const candidates = [];
+    const ownText = textOf(element);
+    if (ownText) candidates.push({ text: ownText, labelText: true });
+
+    for (const sibling of [element.nextElementSibling, element.previousElementSibling]) {
+      const siblingText = textOf(sibling);
+      if (siblingText && siblingText.length <= 120) {
+        candidates.push({ text: siblingText, labelText: false });
+      }
+    }
+
+    let parent = element.parentElement;
+    for (let depth = 0; depth < 3 && parent; depth++) {
+      const parentText = textOf(parent);
+      if (parentText && parentText.length <= 260) {
+        candidates.push({ text: parentText, labelText: true });
+      }
+      parent = parent.parentElement;
+    }
+
+    for (const candidate of candidates) {
+      if (candidate.labelText) {
+        const after = numberAfterLabel(candidate.text, labels, ignorePlainSeven);
+        if (after) return after;
+      }
+      const cleaned = labels.reduce(
+        (text, label) => text.split(label).join(' '),
+        candidate.text.replace(/7\s*天/g, ' ').replace(/7\s*day[s]?/gi, ' ')
+      );
+      const values = extractNumbers(cleaned, ignorePlainSeven);
+      if (values.length) return values[0];
+    }
+
+    return '';
+  }
+
+  function fallbackMetric(patterns, ignorePlainSeven) {
+    for (const pattern of patterns) {
+      const match = bodyText.match(pattern);
+      if (match?.[1]) return match[1].trim();
+    }
+    return '';
+  }
+
+  function findMetric(labels, fallbackPatterns, ignorePlainSeven = false) {
+    const elements = Array.from(document.querySelectorAll('body *'))
+      .filter(element => isVisible(element))
+      .filter(element => {
+        const text = textOf(element);
+        return text && text.length <= 180 && containsAnyLabel(text, labels);
+      });
+
+    for (const element of elements) {
+      const value = metricFromElement(element, labels, ignorePlainSeven);
+      if (value) return value;
+    }
+
+    return fallbackMetric(fallbackPatterns, ignorePlainSeven);
+  }
+
+  function hasTodayDate(text) {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+    const day = now.getDate();
+    const normalized = String(text || '').replace(/\s+/g, '');
+    const patterns = [
+      new RegExp(`${year}[-/.年]0?${month}[-/.月]0?${day}日?`),
+      new RegExp(`0?${month}[-/月]0?${day}日?`)
+    ];
+    return patterns.some(pattern => pattern.test(normalized));
+  }
+
+  function dateLikeCount(text) {
+    const matches = String(text || '').match(/\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?|\d{1,2}[-/月]\d{1,2}日?/g);
+    return matches ? matches.length : 0;
+  }
+
+  function removeDateText(text) {
+    return String(text || '')
+      .replace(/\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?/g, ' ')
+      .replace(/\d{1,2}[-/月]\d{1,2}日?/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function incomeFromSevenDayRowText(text) {
+    const withoutDate = removeDateText(text)
+      .replace(/七天统计收入|七天收入统计|7\s*天统计收入|7\s*天收入统计|7-day\s*income\s*statistics/gi, ' ')
+      .replace(/日期|收入|credits?|ldc|linux\s*do/gi, ' ');
+    const values = extractNumbers(withoutDate, false);
+    return values[0] || '';
+  }
+
+  function findSevenDayTodayIncome() {
+    const sectionLabels = [
+      '7天收入统计',
+      '7 天收入统计',
+      '七天收入统计',
+      '七天统计收入',
+      '7 天统计收入',
+      '7天统计收入',
+      '7-day income statistics'
+    ];
+    const visibleElements = Array.from(document.querySelectorAll('body *')).filter(isVisible);
+    const sectionAnchors = visibleElements.filter(element => {
+      const text = textOf(element);
+      return text && containsAnyLabel(text, sectionLabels);
+    });
+    const containers = [];
+
+    for (const anchor of sectionAnchors) {
+      let current = anchor;
+      for (let depth = 0; depth < 6 && current; depth++) {
+        const text = textOf(current);
+        if (text && text.length <= 3000 && hasTodayDate(text)) {
+          containers.push(current);
+        }
+        current = current.parentElement;
+      }
+    }
+
+    if (containers.length === 0) {
+      containers.push(document.body);
+    }
+
+    const selectors = [
+      'tr',
+      '[role="row"]',
+      'li',
+      '[class*="row"]',
+      '[class*="item"]',
+      '[class*="card"]',
+      'div',
+      'p',
+      'span'
+    ].join(',');
+
+    for (const container of containers) {
+      const candidates = Array.from(container.querySelectorAll(selectors))
+        .filter(isVisible)
+        .map(element => textOf(element))
+        .filter(text => text && text.length <= 260 && hasTodayDate(text) && dateLikeCount(text) <= 1);
+
+      for (const text of candidates) {
+        const value = incomeFromSevenDayRowText(text);
+        if (value) return value;
+      }
+
+      const lines = textOf(container).split(/\n|(?=\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)|(?=\d{1,2}[-/月]\d{1,2}日?)/);
+      for (const line of lines) {
+        if (!hasTodayDate(line)) continue;
+        const value = incomeFromSevenDayRowText(line);
+        if (value) return value;
+      }
+    }
+
+    return '';
+  }
+
+  const availableLdc = findMetric(
+    [
+      '可用 LINUX DO Credits',
+      '可用LINUX DO Credits',
+      '可用 LINUXDO Credits',
+      '可用 Linux Do Credits',
+      'Available LINUX DO Credits',
+      'Available Linux Do Credits'
+    ],
+    [
+      /可用\s*LINUX\s*DO\s*Credits[^\d+-]{0,60}([+-]?\d[\d,]*(?:\.\d+)?)/i,
+      /Available\s*LINUX\s*DO\s*Credits[^\d+-]{0,60}([+-]?\d[\d,]*(?:\.\d+)?)/i
+    ]
+  );
+
+  const sevenDayIncome = findMetric(
+    [
+      '7天收入统计',
+      '7 天收入统计',
+      '七天收入统计',
+      '7 天收入',
+      '7天收入',
+      '七天收入',
+      '近 7 天收入',
+      '近7天收入',
+      '7-day income',
+      '7 day income'
+    ],
+    [
+      /7\s*天收入统计[^\d+-]{0,60}([+-]?\d[\d,]*(?:\.\d+)?)/i,
+      /七天收入统计[^\d+-]{0,60}([+-]?\d[\d,]*(?:\.\d+)?)/i,
+      /7\s*天收入[^\d+-]{0,60}([+-]?\d[\d,]*(?:\.\d+)?)/i,
+      /七天收入[^\d+-]{0,60}([+-]?\d[\d,]*(?:\.\d+)?)/i,
+      /近\s*7\s*天收入[^\d+-]{0,60}([+-]?\d[\d,]*(?:\.\d+)?)/i,
+      /7[-\s]*day\s*income[^\d+-]{0,60}([+-]?\d[\d,]*(?:\.\d+)?)/i
+    ],
+    true
+  );
+
+  const yesterdayIncome = findSevenDayTodayIncome() || findMetric(
+    ['昨日收入', '昨天收入', 'Yesterday income', 'Previous day income'],
+    [
+      /昨日收入[^\d+-]{0,60}([+-]?\d[\d,]*(?:\.\d+)?)/i,
+      /昨天收入[^\d+-]{0,60}([+-]?\d[\d,]*(?:\.\d+)?)/i,
+      /Yesterday\s*income[^\d+-]{0,60}([+-]?\d[\d,]*(?:\.\d+)?)/i,
+      /Previous\s*day\s*income[^\d+-]{0,60}([+-]?\d[\d,]*(?:\.\d+)?)/i
+    ]
+  );
+
+  if (availableLdc || sevenDayIncome || yesterdayIncome) {
+    return {
+      ok: true,
+      status: 'ok',
+      message: 'LDC 已刷新',
+      availableLdc,
+      sevenDayIncome,
+      yesterdayIncome
+    };
+  }
+
+  if (/立即开始|开始|start|get started/i.test(bodyText)) {
+    return {
+      ok: false,
+      status: 'need-start',
+      message: '请先在 LDC 页面点击立即开始'
+    };
+  }
+
+  return {
+    ok: false,
+    status: 'no-data',
+    message: '没有在页面上识别到可用 LINUX DO Credits、7 天收入和昨日收入'
+  };
+}
 
 async function handleCheckinAll(options = {}) {
   const sites = await getSites();
