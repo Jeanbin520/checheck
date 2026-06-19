@@ -6,7 +6,10 @@
 </head>
 <body>
   <div class="container">
-    <h1>佬站助手</h1>
+    <div class="app-header">
+      <h1>佬站助手</h1>
+      <button id="open-settings" class="icon-button" type="button" aria-label="打开设置" title="设置">⚙</button>
+    </div>
 
     <div class="tab-list" role="tablist" aria-label="功能">
       <button id="tab-reading" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="reading-panel" data-tab-target="reading-panel">LinuxDO 阅读</button>
@@ -29,24 +32,6 @@
           <button id="add-site" class="btn-secondary">添加</button>
         </div>
         <ul id="site-list" class="site-list"></ul>
-      </div>
-
-      <div class="section">
-        <h2>设置</h2>
-        <div class="setting-item">
-          <label for="close-delay">签到成功后延迟关闭 (秒):</label>
-          <input type="number" id="close-delay" min="0" max="30" value="3">
-        </div>
-        <div class="setting-item">
-          <label for="schedule-enabled" class="schedule-toggle">
-            <input type="checkbox" id="schedule-enabled">
-            定时自动签到
-          </label>
-        </div>
-        <div class="setting-item schedule-time-row">
-          <label for="schedule-time">每日执行时间:</label>
-          <input type="time" id="schedule-time" value="09:00">
-        </div>
       </div>
 
       <div class="section log-section">
@@ -100,26 +85,29 @@
         </div>
 
         <div class="reading-controls">
-          <label for="linuxdo-reading-speed">速度</label>
-          <select id="linuxdo-reading-speed">
-            <option value="randomSlow">随机慢</option>
-            <option value="slow">慢</option>
-            <option value="normal">正常</option>
-            <option value="fast">快</option>
-          </select>
+          <div class="reading-control">
+            <label for="linuxdo-reading-speed">速度</label>
+            <select id="linuxdo-reading-speed">
+              <option value="randomSlow">慢</option>
+              <option value="normal">正常</option>
+              <option value="fast">快</option>
+            </select>
+          </div>
 
-          <label for="linuxdo-reading-max-minutes">最长时间</label>
-          <select id="linuxdo-reading-max-minutes">
-            <option value="3">3 分钟</option>
-            <option value="5">5 分钟</option>
-            <option value="8">8 分钟</option>
-            <option value="12">12 分钟</option>
-            <option value="20">20 分钟</option>
-            <option value="30">30 分钟</option>
-            <option value="60">60 分钟</option>
-            <option value="90">90 分钟</option>
-            <option value="120">120 分钟</option>
-          </select>
+          <div class="reading-control">
+            <label for="linuxdo-reading-max-minutes">最长时间</label>
+            <select id="linuxdo-reading-max-minutes">
+              <option value="3">3 分钟</option>
+              <option value="5">5 分钟</option>
+              <option value="8">8 分钟</option>
+              <option value="12">12 分钟</option>
+              <option value="20">20 分钟</option>
+              <option value="30">30 分钟</option>
+              <option value="60">60 分钟</option>
+              <option value="90">90 分钟</option>
+              <option value="120">120 分钟</option>
+            </select>
+          </div>
         </div>
 
         <label class="reading-check">
@@ -130,6 +118,44 @@
         <div class="reading-actions">
           <button id="linuxdo-reading-start" class="btn-secondary" type="button">开始</button>
           <button id="linuxdo-reading-stop" class="btn-secondary" type="button">停止</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="settings-panel" class="tab-panel" role="tabpanel" hidden>
+      <div class="settings-title-row">
+        <h2>设置</h2>
+        <button id="settings-back" class="btn-text" type="button">返回</button>
+      </div>
+
+      <div class="section">
+        <h2>页面增强</h2>
+        <div class="setting-item setting-row">
+          <div>
+            <label for="base64-decoder-enabled">开始Base64识别转换</label>
+          </div>
+          <label class="reading-switch" title="开启后自动识别可疑 Base64">
+            <input type="checkbox" id="base64-decoder-enabled">
+            <span></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>签到设置</h2>
+        <div class="setting-item">
+          <label for="close-delay">签到成功后延迟关闭 (秒):</label>
+          <input type="number" id="close-delay" min="0" max="30" value="3">
+        </div>
+        <div class="setting-item">
+          <label for="schedule-enabled" class="schedule-toggle">
+            <input type="checkbox" id="schedule-enabled">
+            定时自动签到
+          </label>
+        </div>
+        <div class="setting-item schedule-time-row">
+          <label for="schedule-time">每日执行时间:</label>
+          <input type="time" id="schedule-time" value="09:00">
         </div>
       </div>
     </div>

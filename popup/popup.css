@@ -14,10 +14,39 @@ body {
   height: 100vh;
 }
 
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
 h1 {
   font-size: 18px;
-  margin-bottom: 12px;
   color: #1a73e8;
+}
+
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 1px solid #d7dde6;
+  border-radius: 6px;
+  background: white;
+  color: #53616f;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-button:hover,
+.icon-button.active {
+  border-color: #c7d7ef;
+  color: #1a73e8;
+  background: #f3f8ff;
 }
 
 .tab-list {
@@ -227,6 +256,16 @@ h2 {
   color: #555;
 }
 
+.setting-row {
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.setting-row .reading-switch {
+  margin-top: 2px;
+}
+
 .setting-item input[type="number"] {
   width: 60px;
   padding: 4px 8px;
@@ -334,16 +373,25 @@ h2 {
 
 .reading-controls {
   display: grid;
-  grid-template-columns: 72px 1fr;
-  align-items: center;
-  gap: 8px 10px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: end;
+  gap: 10px;
   margin-top: 10px;
 }
 
-.reading-controls label,
+.reading-control {
+  min-width: 0;
+}
+
+.reading-control label,
 .reading-check {
   color: #555;
   font-size: 13px;
+}
+
+.reading-control label {
+  display: block;
+  margin-bottom: 5px;
 }
 
 .reading-controls select {
@@ -429,4 +477,11 @@ h2 {
 
 .ldc-actions .btn-secondary {
   min-height: 32px;
+}
+
+.settings-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }

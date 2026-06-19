@@ -5,11 +5,16 @@
   window.__linuxdoReadingHelperLoaded = true;
 
   const STORAGE_KEY = "linuxdoReadingHelper";
+  const CONFIG_KEY = "config";
 
   const DEFAULTS = {
     speed: "normal",
     maxMinutes: 8,
     pauseOnUserInput: true
+  };
+
+  const DEFAULT_CONFIG = {
+    base64DecoderEnabled: false
   };
 
   const SPEEDS = {
@@ -21,6 +26,7 @@
 
   const state = {
     settings: { ...DEFAULTS },
+    config: { ...DEFAULT_CONFIG },
     running: false,
     timer: 0,
     startedAt: 0,
@@ -50,6 +56,14 @@
     return settings;
   }
 
+  function normalizedConfig(raw) {
+    return {
+      ...DEFAULT_CONFIG,
+      ...(raw || {}),
+      base64DecoderEnabled: raw?.base64DecoderEnabled === true
+    };
+  }
+
   function randomBetween(min, max) {
     return Math.floor(min + Math.random() * (max - min + 1));
   }
@@ -64,6 +78,393 @@
       style.display !== "none" &&
       Number(style.opacity || 1) > 0.05
     );
+  }
+
+  const BASE64_DECODER_ROOT_CLASS = "checheck-b64-root";
+  const BASE64_DECODER_UI_CLASS = "checheck-b64-ui";
+  const BASE64_DECODER_STYLE_ID = "checheck-b64-decoder-style";
+  const BASE64_MIN_LENGTH = 24;
+  const BASE64_MAX_LENGTH = 16000;
+  const BASE64_MAX_RESULTS_PER_PASS = 160;
+  const BASE64_CANDIDATE_PATTERN =
+    /(?:^|[^A-Za-z0-9+/=_-])([A-Za-z0-9+/_-]{24,}={0,2})(?=$|[^A-Za-z0-9+/=_-])/g;
+
+  let base64ScanTimer = 0;
+  let base64Observer = null;
+
+  function ensureBase64DecoderStyles() {
+    if (document.getElementById(BASE64_DECODER_STYLE_ID)) return;
+
+    const style = document.createElement("style");
+    style.id = BASE64_DECODER_STYLE_ID;
+    style.textContent = `
+      .${BASE64_DECODER_ROOT_CLASS} {
+        display: inline;
+      }
+
+      .${BASE64_DECODER_ROOT_CLASS} .checheck-b64-token {
+        border-radius: 3px;
+        background: rgba(255, 213, 79, 0.18);
+        box-decoration-break: clone;
+        -webkit-box-decoration-break: clone;
+        padding: 0 2px;
+      }
+
+      .${BASE64_DECODER_ROOT_CLASS} .checheck-b64-button,
+      .${BASE64_DECODER_ROOT_CLASS} .checheck-b64-copy {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 20px;
+        margin: 0 4px;
+        border: 1px solid rgba(0, 0, 0, 0.16);
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.95);
+        color: #2f5d8c;
+        font: 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        cursor: pointer;
+        padding: 2px 6px;
+        vertical-align: baseline;
+      }
+
+      .${BASE64_DECODER_ROOT_CLASS} .checheck-b64-button:hover,
+      .${BASE64_DECODER_ROOT_CLASS} .checheck-b64-copy:hover {
+        border-color: rgba(47, 93, 140, 0.45);
+        background: #f4f8ff;
+      }
+
+      .${BASE64_DECODER_ROOT_CLASS} .checheck-b64-result[hidden] {
+        display: none !important;
+      }
+
+      .${BASE64_DECODER_ROOT_CLASS} .checheck-b64-result {
+        display: block;
+        box-sizing: border-box;
+        max-width: min(760px, calc(100vw - 48px));
+        max-height: 280px;
+        overflow: auto;
+        margin: 6px 0 8px;
+        border: 1px solid rgba(47, 93, 140, 0.22);
+        border-radius: 6px;
+        background: #f8fbff;
+        color: #17202a;
+        font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        padding: 8px 10px;
+      }
+
+      .${BASE64_DECODER_ROOT_CLASS} .checheck-b64-meta {
+        display: block;
+        color: #62748a;
+        font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin-bottom: 6px;
+      }
+
+      .${BASE64_DECODER_ROOT_CLASS} .checheck-b64-output {
+        display: block;
+      }
+    `;
+    document.documentElement.appendChild(style);
+  }
+
+  function normalizeBase64Candidate(raw) {
+    const compact = String(raw || "").replace(/\s+/g, "");
+    if (compact.length < BASE64_MIN_LENGTH || compact.length > BASE64_MAX_LENGTH) {
+      return null;
+    }
+    if (!/[A-Za-z]/.test(compact)) return null;
+    if (/^[0-9a-f]+$/i.test(compact)) return null;
+    if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(compact)) return null;
+    if (/=/.test(compact.slice(0, -2))) return null;
+
+    const normalized = compact.replace(/-/g, "+").replace(/_/g, "/");
+    const remainder = normalized.length % 4;
+    if (remainder === 1) return null;
+    return normalized + "=".repeat((4 - remainder) % 4);
+  }
+
+  function decodeBase64Text(raw) {
+    const normalized = normalizeBase64Candidate(raw);
+    if (!normalized) return null;
+
+    try {
+      const binary = atob(normalized);
+      if (binary.length < 4) return null;
+
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+
+      let text = "";
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch (error) {
+        return null;
+      }
+
+      if (!looksLikeReadableDecodedText(text)) return null;
+
+      return {
+        text,
+        byteLength: bytes.length,
+        truncated: text.length > 8000
+      };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function looksLikeReadableDecodedText(text) {
+    const trimmed = String(text || "").trim();
+    if (trimmed.length < 3) return false;
+
+    let total = 0;
+    let readable = 0;
+    for (const char of text) {
+      const code = char.codePointAt(0);
+      total += 1;
+      if (code === 9 || code === 10 || code === 13 || (code >= 32 && code !== 127)) {
+        readable += 1;
+      }
+    }
+
+    return total > 0 && readable / total >= 0.9;
+  }
+
+  function findBase64Candidates(text) {
+    const candidates = [];
+    BASE64_CANDIDATE_PATTERN.lastIndex = 0;
+
+    let match;
+    while ((match = BASE64_CANDIDATE_PATTERN.exec(text))) {
+      const raw = match[1];
+      const decoded = decodeBase64Text(raw);
+      if (!decoded) continue;
+
+      const start = match.index + match[0].indexOf(raw);
+      candidates.push({
+        raw,
+        start,
+        end: start + raw.length
+      });
+    }
+
+    return candidates;
+  }
+
+  function shouldSkipBase64Node(node) {
+    const parent = node.parentElement;
+    if (!parent) return true;
+    if (!node.nodeValue || node.nodeValue.length < BASE64_MIN_LENGTH) return true;
+    return !!parent.closest(
+      [
+        `.${BASE64_DECODER_ROOT_CLASS}`,
+        `.${BASE64_DECODER_UI_CLASS}`,
+        "script",
+        "style",
+        "textarea",
+        "input",
+        "select",
+        "button",
+        "[contenteditable='true']"
+      ].join(",")
+    );
+  }
+
+  function createBase64Wrapper(raw) {
+    const wrapper = document.createElement("span");
+    wrapper.className = BASE64_DECODER_ROOT_CLASS;
+
+    const token = document.createElement("span");
+    token.className = "checheck-b64-token";
+    token.textContent = raw;
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `checheck-b64-button ${BASE64_DECODER_UI_CLASS}`;
+    button.textContent = "解码";
+    button.title = "解码这段可疑 Base64";
+
+    const result = document.createElement("span");
+    result.className = `checheck-b64-result ${BASE64_DECODER_UI_CLASS}`;
+    result.hidden = true;
+
+    let rendered = false;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (!rendered) {
+        renderBase64Result(raw, result);
+        rendered = true;
+      }
+
+      result.hidden = !result.hidden;
+      button.textContent = result.hidden ? "解码" : "收起";
+    });
+
+    wrapper.append(token, button, result);
+    return wrapper;
+  }
+
+  function renderBase64Result(raw, resultElement) {
+    const decoded = decodeBase64Text(raw);
+    resultElement.textContent = "";
+
+    if (!decoded) {
+      resultElement.textContent = "解码失败：这段内容不像可读的 UTF-8 Base64。";
+      return;
+    }
+
+    const meta = document.createElement("span");
+    meta.className = "checheck-b64-meta";
+    meta.textContent = `UTF-8 文本，${decoded.byteLength} bytes`;
+
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = `checheck-b64-copy ${BASE64_DECODER_UI_CLASS}`;
+    copyButton.textContent = "复制";
+    copyButton.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        await navigator.clipboard.writeText(decoded.text);
+        copyButton.textContent = "已复制";
+        window.setTimeout(() => {
+          copyButton.textContent = "复制";
+        }, 1200);
+      } catch (error) {
+        copyButton.textContent = "复制失败";
+        window.setTimeout(() => {
+          copyButton.textContent = "复制";
+        }, 1200);
+      }
+    });
+    meta.appendChild(copyButton);
+
+    const output = document.createElement("span");
+    output.className = "checheck-b64-output";
+    output.textContent = decoded.truncated
+      ? `${decoded.text.slice(0, 8000)}\n\n... 已截断，仅显示前 8000 个字符`
+      : decoded.text;
+
+    resultElement.append(meta, output);
+  }
+
+  function decorateBase64TextNode(node) {
+    const text = node.nodeValue;
+    const candidates = findBase64Candidates(text);
+    if (candidates.length === 0) return 0;
+
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+
+    for (const candidate of candidates) {
+      if (candidate.start < cursor) continue;
+      fragment.appendChild(document.createTextNode(text.slice(cursor, candidate.start)));
+      fragment.appendChild(createBase64Wrapper(candidate.raw));
+      cursor = candidate.end;
+    }
+
+    fragment.appendChild(document.createTextNode(text.slice(cursor)));
+    node.parentNode.replaceChild(fragment, node);
+    return candidates.length;
+  }
+
+  function getBase64ScanRoots() {
+    const roots = Array.from(
+      document.querySelectorAll(".topic-post .cooked, article .cooked, .cooked")
+    );
+    if (roots.length > 0) return roots;
+
+    if (!isTopicPage()) return [];
+    return [document.querySelector("#main-outlet") || document.body].filter(Boolean);
+  }
+
+  function scanSuspiciousBase64() {
+    if (!state.config.base64DecoderEnabled || !document.body || !isTopicPage()) return;
+
+    ensureBase64DecoderStyles();
+    let decoratedCount = 0;
+
+    for (const root of getBase64ScanRoots()) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          if (shouldSkipBase64Node(node)) return NodeFilter.FILTER_REJECT;
+          if (!BASE64_CANDIDATE_PATTERN.test(node.nodeValue)) {
+            BASE64_CANDIDATE_PATTERN.lastIndex = 0;
+            return NodeFilter.FILTER_REJECT;
+          }
+          BASE64_CANDIDATE_PATTERN.lastIndex = 0;
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      });
+
+      const textNodes = [];
+      while (walker.nextNode()) {
+        textNodes.push(walker.currentNode);
+      }
+
+      for (const node of textNodes) {
+        decoratedCount += decorateBase64TextNode(node);
+        if (decoratedCount >= BASE64_MAX_RESULTS_PER_PASS) return;
+      }
+    }
+  }
+
+  function scheduleSuspiciousBase64Scan(delay = 250) {
+    if (!state.config.base64DecoderEnabled) return;
+    if (base64ScanTimer) window.clearTimeout(base64ScanTimer);
+    base64ScanTimer = window.setTimeout(() => {
+      base64ScanTimer = 0;
+      scanSuspiciousBase64();
+    }, delay);
+  }
+
+  function initSuspiciousBase64Decoder() {
+    if (!state.config.base64DecoderEnabled) return;
+    scheduleSuspiciousBase64Scan(150);
+
+    if (base64Observer) return;
+    base64Observer = new MutationObserver(() => {
+      scheduleSuspiciousBase64Scan(350);
+    });
+    base64Observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true
+    });
+  }
+
+  function unwrapSuspiciousBase64Decoder() {
+    for (const wrapper of document.querySelectorAll(`.${BASE64_DECODER_ROOT_CLASS}`)) {
+      const token = wrapper.querySelector(".checheck-b64-token");
+      const parent = wrapper.parentNode;
+      if (!parent) continue;
+      parent.replaceChild(document.createTextNode(token ? token.textContent : wrapper.textContent), wrapper);
+      parent.normalize();
+    }
+  }
+
+  function stopSuspiciousBase64Decoder() {
+    if (base64ScanTimer) {
+      window.clearTimeout(base64ScanTimer);
+      base64ScanTimer = 0;
+    }
+    if (base64Observer) {
+      base64Observer.disconnect();
+      base64Observer = null;
+    }
+    unwrapSuspiciousBase64Decoder();
+  }
+
+  function syncSuspiciousBase64Decoder() {
+    if (state.config.base64DecoderEnabled) {
+      initSuspiciousBase64Decoder();
+    } else {
+      stopSuspiciousBase64Decoder();
+    }
   }
 
   function parseRgb(color) {
@@ -257,6 +658,13 @@
     });
   }
 
+  function loadConfig(callback) {
+    chrome.storage.local.get({ [CONFIG_KEY]: DEFAULT_CONFIG }, (stored) => {
+      state.config = normalizedConfig(stored[CONFIG_KEY]);
+      if (callback) callback();
+    });
+  }
+
   function saveSettings(nextSettings) {
     state.settings = normalizedSettings({ ...state.settings, ...nextSettings });
     chrome.storage.local.set({ [STORAGE_KEY]: state.settings });
@@ -313,14 +721,23 @@
   });
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== "local" || !changes[STORAGE_KEY]) return;
-    state.settings = normalizedSettings({
-      ...state.settings,
-      ...(changes[STORAGE_KEY].newValue || {})
-    });
+    if (areaName !== "local") return;
+
+    if (changes[STORAGE_KEY]) {
+      state.settings = normalizedSettings({
+        ...state.settings,
+        ...(changes[STORAGE_KEY].newValue || {})
+      });
+    }
+
+    if (changes[CONFIG_KEY]) {
+      state.config = normalizedConfig(changes[CONFIG_KEY].newValue);
+      syncSuspiciousBase64Decoder();
+    }
   });
 
   loadSettings(() => {
     setStatus("idle");
+    loadConfig(syncSuspiciousBase64Decoder);
   });
 })();

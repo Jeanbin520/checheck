@@ -32,10 +32,16 @@ const LINUXDO_READING_STOPPED_STATUSES = new Set([
   'time-limit'
 ]);
 const LDC_CREDIT_STORAGE_KEY = 'ldcCredit';
+const SETTINGS_PANEL_ID = 'settings-panel';
 
 let linuxdoReadingActiveTabId = null;
 let linuxdoReadingActiveTabUrl = '';
 let linuxdoReadingSettings = { ...LINUXDO_READING_UI_DEFAULTS };
+let lastMainPanelId = 'reading-panel';
+
+function normalizeReadingSpeedForUi(speed) {
+  return speed === 'slow' ? 'randomSlow' : speed;
+}
 
 async function renderSites() {
   const sites = await getSites();
@@ -143,12 +149,23 @@ function escapeHtml(text) {
 function setActiveTab(panelId) {
   const buttons = document.querySelectorAll('.tab-button');
   const panels = document.querySelectorAll('.tab-panel');
+  const settingsButton = $('#open-settings');
+
+  if (panelId !== SETTINGS_PANEL_ID) {
+    lastMainPanelId = panelId;
+  }
 
   buttons.forEach(button => {
     const active = button.dataset.tabTarget === panelId;
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
   });
+
+  if (settingsButton) {
+    const settingsActive = panelId === SETTINGS_PANEL_ID;
+    settingsButton.classList.toggle('active', settingsActive);
+    settingsButton.setAttribute('aria-pressed', settingsActive ? 'true' : 'false');
+  }
 
   panels.forEach(panel => {
     const active = panel.id === panelId;
@@ -162,6 +179,24 @@ function setActiveTab(panelId) {
   }
   if (panelId === 'checkin-panel') {
     renderLogs();
+  }
+}
+
+function initSettingsPanel() {
+  const settingsButton = $('#open-settings');
+  const backButton = $('#settings-back');
+
+  if (settingsButton) {
+    settingsButton.addEventListener('click', () => {
+      const isOpen = $('#settings-panel')?.classList.contains('active');
+      setActiveTab(isOpen ? lastMainPanelId : SETTINGS_PANEL_ID);
+    });
+  }
+
+  if (backButton) {
+    backButton.addEventListener('click', () => {
+      setActiveTab(lastMainPanelId);
+    });
   }
 }
 
@@ -345,6 +380,7 @@ function readLinuxdoReadingForm() {
 function writeLinuxdoReadingForm(nextSettings) {
   const { enabledInput, speedInput, maxMinutesInput, pauseInput } = getLinuxdoReadingElements();
   linuxdoReadingSettings = { ...LINUXDO_READING_UI_DEFAULTS, ...(nextSettings || {}) };
+  linuxdoReadingSettings.speed = normalizeReadingSpeedForUi(linuxdoReadingSettings.speed);
   if (enabledInput) enabledInput.checked = !!linuxdoReadingSettings.enabled;
   if (speedInput) speedInput.value = linuxdoReadingSettings.speed;
   if (maxMinutesInput) maxMinutesInput.value = String(linuxdoReadingSettings.maxMinutes);
@@ -679,10 +715,19 @@ async function renderConfig() {
     // 仅在开关已开启时才需要重同步闹钟
     if (scheduleEnabled.checked) syncSchedule();
   });
+
+  const base64DecoderEnabled = $('#base64-decoder-enabled');
+  if (base64DecoderEnabled) {
+    base64DecoderEnabled.checked = !!config.base64DecoderEnabled;
+    base64DecoderEnabled.addEventListener('change', async () => {
+      await saveConfig({ base64DecoderEnabled: base64DecoderEnabled.checked });
+    });
+  }
 }
 
 console.log('[签到助手] Side Panel 已加载');
 initTabs();
+initSettingsPanel();
 renderSites();
 renderDropdown();
 renderDetected();
