@@ -12,7 +12,7 @@
     </div>
 
     <div class="tab-list" role="tablist" aria-label="功能">
-      <button id="tab-reading" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="reading-panel" data-tab-target="reading-panel">LinuxDO 阅读</button>
+      <button id="tab-reading" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="reading-panel" data-tab-target="reading-panel">Linux.do</button>
       <button id="tab-checkin" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="checkin-panel" data-tab-target="checkin-panel">公益站签到</button>
     </div>
 
@@ -31,95 +31,350 @@
           </select>
           <button id="add-site" class="btn-secondary">添加</button>
         </div>
-        <ul id="site-list" class="site-list"></ul>
-      </div>
 
-      <div class="section log-section">
-        <div class="log-header">
-          <h2>运行日志</h2>
-          <div class="log-actions">
-            <button id="copy-logs" class="btn-text">复制</button>
-            <button id="clear-logs" class="btn-text">清空</button>
+        <details class="custom-site-details">
+          <summary>新增自定义站点</summary>
+          <div class="site-rule-help">
+            <p>优先从上方预设站点添加。这里主要给没有预设的站点用：先填名称和 URL，选一个类型，跑不通再展开高级规则微调。</p>
+            <ul>
+              <li>如果站点已保持登录，会跳过登录 / LinuxDO 授权，直接进入签到页面路径查找签到按钮。</li>
+              <li>不确定怎么填时，先点下面的推荐配置，再按实际站点改名称和 URL。</li>
+            </ul>
           </div>
-        </div>
-        <div id="log-area" class="log-area"></div>
+          <form id="custom-site-form" class="site-rule-form">
+            <div class="site-rule-presets" aria-label="推荐配置">
+              <button class="btn-secondary" type="button" data-rule-preset="generic">普通按钮站</button>
+              <button class="btn-secondary" type="button" data-rule-preset="new-api-linuxdo">New API / LinuxDO</button>
+              <button class="btn-secondary" type="button" data-rule-preset="chybenzun">CHY 示例</button>
+            </div>
+            <label>
+              站点名称
+              <input name="siteName" type="text" placeholder="例如 示例公益站" required>
+            </label>
+            <label>
+              站点 URL
+              <input name="siteUrl" type="url" placeholder="https://example.com/" required>
+            </label>
+            <label>
+              签到模板
+              <select name="template" data-rule-template required>
+                <option value="generic-button-checkin">通用按钮签到</option>
+                <option value="new-api-linuxdo-button">New API + LinuxDO 按钮签到</option>
+              </select>
+            </label>
+            <label>
+              签到页面路径
+              <input name="startPath" type="text" placeholder="/profile" value="/">
+              <span class="site-rule-hint">填登录后真正出现签到按钮的页面，例如 <code>/profile</code>、<code>/console/personal</code>、<code>/</code>。</span>
+            </label>
+            <details class="site-rule-advanced">
+              <summary>高级规则（通常不用改）</summary>
+              <div class="site-rule-fields">
+                <label>
+                  控件选择器
+                  <input name="selector" type="text" value="button, a, [role=&quot;button&quot;]">
+                </label>
+                <label>
+                  精确匹配文字
+                  <input name="exactMatchText" type="text" placeholder="立即签到">
+                </label>
+                <label>
+                  匹配文字
+                  <input name="matchText" type="text" value="签到, 立即签到, checkin, check in">
+                </label>
+                <label>
+                  排除文字
+                  <input name="excludeText" type="text" value="每日签到">
+                </label>
+                <label>
+                  完成状态文字
+                  <input name="completeText" type="text" value="今日已签到, 已签到, already checked, checked in">
+                </label>
+                <div class="new-api-rule-fields" data-template-only="new-api-linuxdo-button" hidden>
+                  <label>
+                    LinuxDO client_id
+                    <input name="linuxdoClientId" type="text" placeholder="通常可留空">
+                  </label>
+                  <label>
+                    登录页路径
+                    <input name="loginPaths" type="text" value="/login, /signin, /sign-in">
+                  </label>
+                  <label>
+                    授权成功路径
+                    <input name="successUrlIncludes" type="text" value="/console/personal">
+                  </label>
+                  <label>
+                    协议复选框选择器
+                    <input name="agreementSelector" type="text" value="input[type=&quot;checkbox&quot;]">
+                  </label>
+                  <label class="site-rule-checkbox">
+                    <input name="closeAnnouncement" type="checkbox" checked>
+                    自动关闭公告
+                  </label>
+                </div>
+              </div>
+            </details>
+            <button class="btn-secondary" type="submit">添加自定义站点</button>
+          </form>
+        </details>
+
+        <ul id="site-list" class="site-list"></ul>
       </div>
     </div>
 
     <div id="reading-panel" class="tab-panel active" role="tabpanel" aria-labelledby="tab-reading">
-      <div class="section ldc-section">
-        <div class="ldc-header">
+      <button id="linuxdo-unread" class="linuxdo-unread" type="button" hidden>
+        您有 <strong id="linuxdo-unread-count">0</strong> 条未读消息，点击查看
+      </button>
+
+      <div class="section linuxdo-status-section">
+        <div class="linuxdo-section-header">
+          <div>
+            <h2>我的状态</h2>
+            <p id="linuxdo-status" class="reading-status">正在读取 Linux.do 状态...</p>
+          </div>
+          <button id="linuxdo-refresh-board" class="icon-button linuxdo-header-icon-button" type="button" aria-label="刷新 Linux.do 状态和社区看板" title="刷新 Linux.do 状态和社区看板">↻</button>
+        </div>
+
+        <div class="linuxdo-status-grid">
+          <div class="linuxdo-status-card">
+            <span>未读通知</span>
+            <strong id="linuxdo-status-unread">--</strong>
+          </div>
+          <div class="linuxdo-status-card">
+            <span>私信</span>
+            <strong id="linuxdo-status-messages">--</strong>
+          </div>
+        </div>
+
+        <div class="linuxdo-actions">
+          <button id="linuxdo-open-home" class="btn-secondary" type="button">打开 Linux.do</button>
+          <button id="linuxdo-open-notifications" class="btn-secondary" type="button">通知</button>
+          <button id="linuxdo-open-messages" class="btn-secondary" type="button">私信</button>
+        </div>
+      </div>
+
+      <div class="section linuxdo-board-section">
+        <div class="linuxdo-section-header">
+          <div>
+            <h2>社区看板</h2>
+            <p id="linuxdo-board-status" class="reading-status">展示最新主题和今日热门</p>
+          </div>
+          <div class="linuxdo-board-header-actions">
+            <button id="linuxdo-board-refresh" class="icon-button linuxdo-board-icon-button" type="button" aria-label="刷新社区看板" title="刷新社区看板">↻</button>
+            <button id="linuxdo-board-toggle" class="icon-button linuxdo-board-icon-button linuxdo-board-toggle" type="button" aria-label="展开社区看板" aria-expanded="false" disabled title="刷新成功后可展开">⌄</button>
+          </div>
+        </div>
+
+        <div id="linuxdo-board-body" hidden>
+          <div class="linuxdo-board-filter">
+            <label for="linuxdo-board-category">主题类别</label>
+            <select id="linuxdo-board-category">
+              <option value="all">全部类别</option>
+            </select>
+          </div>
+
+          <div class="linuxdo-board-tabs" role="tablist" aria-label="Linux.do 社区看板">
+            <button class="linuxdo-board-tab active" type="button" data-linuxdo-board="latest">最新</button>
+            <button class="linuxdo-board-tab" type="button" data-linuxdo-board="top">今日热门</button>
+          </div>
+
+          <div id="linuxdo-latest-topics" class="linuxdo-topic-list"></div>
+          <div id="linuxdo-top-topics" class="linuxdo-topic-list" hidden></div>
+        </div>
+      </div>
+
+      <details class="section linuxdo-keywords-section linuxdo-secondary-section">
+        <summary class="linuxdo-summary">
+          <div>
+            <h2>关键词订阅</h2>
+            <p id="linuxdo-keyword-status" class="reading-status">追踪你感兴趣的新主题</p>
+          </div>
+          <span class="linuxdo-summary-chevron">⌄</span>
+        </summary>
+
+        <div class="linuxdo-secondary-body">
+          <div class="linuxdo-actions linuxdo-compact-actions">
+            <button id="linuxdo-keyword-refresh" class="btn-secondary" type="button">刷新命中</button>
+          </div>
+
+          <form id="linuxdo-keyword-form" class="linuxdo-inline-form">
+            <input id="linuxdo-keyword-input" type="text" placeholder="例如 OpenAI、new-api、优惠">
+            <button class="btn-secondary" type="submit">添加</button>
+          </form>
+
+          <div id="linuxdo-keyword-list" class="linuxdo-chip-list"></div>
+          <div id="linuxdo-keyword-matches" class="linuxdo-compact-list"></div>
+        </div>
+      </details>
+
+      <details class="section linuxdo-read-later-section linuxdo-secondary-section">
+        <summary class="linuxdo-summary">
+          <div>
+            <h2>稍后读</h2>
+            <p id="linuxdo-read-later-status" class="reading-status">本地收藏，不依赖站点书签</p>
+          </div>
+          <span class="linuxdo-summary-chevron">⌄</span>
+        </summary>
+
+        <div class="linuxdo-secondary-body">
+          <div class="linuxdo-actions linuxdo-compact-actions">
+            <button id="linuxdo-read-later-refresh" class="btn-secondary" type="button">刷新收藏</button>
+          </div>
+
+          <div class="linuxdo-filter-row">
+            <input id="linuxdo-read-later-search" type="search" placeholder="搜索标题 / 备注 / 标签">
+            <select id="linuxdo-read-later-filter">
+              <option value="all">全部状态</option>
+              <option value="unread">未读</option>
+              <option value="read">已读</option>
+              <option value="archived">已归档</option>
+            </select>
+          </div>
+
+          <div class="linuxdo-actions">
+            <button id="linuxdo-read-later-export-md" class="btn-secondary" type="button">导出 Markdown</button>
+            <button id="linuxdo-read-later-export-json" class="btn-secondary" type="button">导出 JSON</button>
+          </div>
+
+          <div id="linuxdo-read-later-list" class="linuxdo-compact-list"></div>
+        </div>
+      </details>
+
+      <details class="section linuxdo-current-topic-section linuxdo-secondary-section">
+        <summary class="linuxdo-summary">
+          <div>
+            <h2>当前帖子</h2>
+            <p id="linuxdo-current-topic-status" class="reading-status">读取当前活动 Linux.do 主题页</p>
+          </div>
+          <span class="linuxdo-summary-chevron">⌄</span>
+        </summary>
+
+        <div class="linuxdo-secondary-body">
+          <div class="linuxdo-actions linuxdo-compact-actions">
+            <button id="linuxdo-current-topic-refresh" class="btn-secondary" type="button">读取当前帖子</button>
+          </div>
+
+          <div id="linuxdo-current-topic-card" class="linuxdo-current-topic-card"></div>
+
+          <div class="linuxdo-actions">
+            <button id="linuxdo-current-add-read-later" class="btn-secondary" type="button" disabled>加入稍后读</button>
+            <button id="linuxdo-current-copy-quote" class="btn-secondary" type="button" disabled>复制 Markdown 引用</button>
+            <button id="linuxdo-current-extract" class="btn-secondary" type="button" disabled>提取资源</button>
+          </div>
+
+          <div class="linuxdo-filter-row">
+            <select id="linuxdo-resource-filter">
+              <option value="all">全部资源</option>
+              <option value="github">GitHub</option>
+              <option value="docs">文档</option>
+              <option value="cloud-drive">网盘</option>
+              <option value="api">API</option>
+              <option value="image">图片</option>
+              <option value="download">下载</option>
+              <option value="other">其他链接</option>
+              <option value="code">代码块</option>
+            </select>
+            <button id="linuxdo-resource-copy" class="btn-secondary" type="button" disabled>复制资源</button>
+          </div>
+          <div id="linuxdo-resource-list" class="linuxdo-compact-list"></div>
+        </div>
+      </details>
+
+      <details id="linuxdo-sensitive-section" class="section linuxdo-sensitive-section linuxdo-secondary-section">
+        <summary class="linuxdo-summary">
+          <div>
+            <h2>敏感信息提醒</h2>
+            <p id="linuxdo-sensitive-status" class="reading-status">本地检测编辑器中的 token、key、cookie</p>
+          </div>
+          <span class="linuxdo-summary-chevron">⌄</span>
+        </summary>
+        <div class="linuxdo-secondary-body">
+          <div id="linuxdo-sensitive-list" class="linuxdo-compact-list"></div>
+        </div>
+      </details>
+
+      <details class="section ldc-section linuxdo-secondary-section">
+        <summary class="linuxdo-summary">
           <div>
             <h2>LDC 状态</h2>
             <p id="ldc-status" class="reading-status">尚未刷新</p>
           </div>
-        </div>
+          <span class="linuxdo-summary-chevron">⌄</span>
+        </summary>
 
-        <div class="ldc-metrics">
-          <div class="ldc-metric">
-            <span>可用 LINUX DO Credits</span>
-            <strong id="ldc-available">--</strong>
+        <div class="linuxdo-secondary-body">
+          <div class="ldc-metrics">
+            <div class="ldc-metric">
+              <span>可用 LINUX DO Credits</span>
+              <strong id="ldc-available">--</strong>
+            </div>
+            <div class="ldc-metric">
+              <span id="ldc-seven-day-label">7 天收入（昨日收入：--）</span>
+              <strong id="ldc-seven-day">--</strong>
+            </div>
           </div>
-          <div class="ldc-metric">
-            <span id="ldc-seven-day-label">7 天收入（昨日收入：--）</span>
-            <strong id="ldc-seven-day">--</strong>
+
+          <div class="ldc-actions">
+            <button id="ldc-refresh" class="btn-secondary" type="button">刷新</button>
+            <button id="ldc-open" class="btn-secondary" type="button">打开 LDC 页面</button>
           </div>
         </div>
+      </details>
 
-        <div class="ldc-actions">
-          <button id="ldc-refresh" class="btn-secondary" type="button">刷新</button>
-          <button id="ldc-open" class="btn-secondary" type="button">打开 LDC 页面</button>
-        </div>
-      </div>
-
-      <div class="section reading-section">
-        <div class="reading-title-row">
+      <details class="section reading-section linuxdo-secondary-section">
+        <summary class="linuxdo-summary">
           <div>
-            <h2>LinuxDO 阅读助手</h2>
+            <h2>阅读工具</h2>
             <p id="linuxdo-reading-status" class="reading-status">正在读取状态...</p>
           </div>
-          <label class="reading-switch" title="打开后会在当前 LinuxDO 主题页慢速滚动">
-            <input id="linuxdo-reading-enabled" type="checkbox">
-            <span></span>
+          <div class="linuxdo-summary-actions">
+            <label class="reading-switch" title="打开后会在当前 Linux.do 主题页慢速滚动">
+              <input id="linuxdo-reading-enabled" type="checkbox">
+              <span></span>
+            </label>
+            <span class="linuxdo-summary-chevron">⌄</span>
+          </div>
+        </summary>
+
+        <div class="linuxdo-secondary-body">
+          <div class="reading-controls">
+            <div class="reading-control">
+              <label for="linuxdo-reading-speed">速度</label>
+              <select id="linuxdo-reading-speed">
+                <option value="randomSlow">慢</option>
+                <option value="normal">正常</option>
+                <option value="fast">快</option>
+              </select>
+            </div>
+
+            <div class="reading-control">
+              <label for="linuxdo-reading-max-minutes">最长时间</label>
+              <select id="linuxdo-reading-max-minutes">
+                <option value="3">3 分钟</option>
+                <option value="5">5 分钟</option>
+                <option value="8">8 分钟</option>
+                <option value="12">12 分钟</option>
+                <option value="20">20 分钟</option>
+                <option value="30">30 分钟</option>
+                <option value="60">60 分钟</option>
+                <option value="90">90 分钟</option>
+                <option value="120">120 分钟</option>
+              </select>
+            </div>
+          </div>
+
+          <label class="reading-check">
+            <input id="linuxdo-reading-pause" type="checkbox">
+            <span>手动操作时暂停</span>
           </label>
-        </div>
 
-        <div class="reading-controls">
-          <div class="reading-control">
-            <label for="linuxdo-reading-speed">速度</label>
-            <select id="linuxdo-reading-speed">
-              <option value="randomSlow">慢</option>
-              <option value="normal">正常</option>
-              <option value="fast">快</option>
-            </select>
-          </div>
-
-          <div class="reading-control">
-            <label for="linuxdo-reading-max-minutes">最长时间</label>
-            <select id="linuxdo-reading-max-minutes">
-              <option value="3">3 分钟</option>
-              <option value="5">5 分钟</option>
-              <option value="8">8 分钟</option>
-              <option value="12">12 分钟</option>
-              <option value="20">20 分钟</option>
-              <option value="30">30 分钟</option>
-              <option value="60">60 分钟</option>
-              <option value="90">90 分钟</option>
-              <option value="120">120 分钟</option>
-            </select>
+          <div class="reading-actions">
+            <button id="linuxdo-reading-start" class="btn-secondary" type="button">开始</button>
+            <button id="linuxdo-reading-stop" class="btn-secondary" type="button">停止</button>
           </div>
         </div>
-
-        <label class="reading-check">
-          <input id="linuxdo-reading-pause" type="checkbox">
-          <span>手动操作时暂停</span>
-        </label>
-
-        <div class="reading-actions">
-          <button id="linuxdo-reading-start" class="btn-secondary" type="button">开始</button>
-          <button id="linuxdo-reading-stop" class="btn-secondary" type="button">停止</button>
-        </div>
-      </div>
+      </details>
     </div>
 
     <div id="settings-panel" class="tab-panel" role="tabpanel" hidden>
@@ -133,9 +388,44 @@
         <div class="setting-item setting-row">
           <div>
             <label for="base64-decoder-enabled">开始Base64识别转换</label>
+            <p class="setting-description">自动识别页面中的可疑 Base64 内容，并在本地尝试解码展示，便于阅读隐藏信息。</p>
           </div>
           <label class="reading-switch" title="开启后自动识别可疑 Base64">
             <input type="checkbox" id="base64-decoder-enabled">
+            <span></span>
+          </label>
+        </div>
+        <div class="setting-item setting-row">
+          <div>
+            <label for="sensitive-scan-enabled">Linux.do 敏感信息本地提醒</label>
+            <p class="setting-description">仅在本机扫描 Linux.do 编辑器内容，发现 token、key、cookie 等敏感片段时提醒。</p>
+          </div>
+          <label class="reading-switch" title="开启后仅在本地扫描 Linux.do 编辑器内容，不上传">
+            <input type="checkbox" id="sensitive-scan-enabled">
+            <span></span>
+          </label>
+        </div>
+        <div class="setting-item setting-row">
+          <div>
+            <label for="current-topic-enhance-enabled">当前帖子增强</label>
+            <p class="setting-description">允许侧边栏读取当前 Linux.do 主题页的标题、链接和可见资源，用于收藏、引用和提取。</p>
+          </div>
+          <label class="reading-switch" title="开启后侧边栏可读取当前 Linux.do 主题页的可见资源">
+            <input type="checkbox" id="current-topic-enhance-enabled">
+            <span></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>界面设置</h2>
+        <div class="setting-item setting-row">
+          <div>
+            <label for="show-logs-panel">在阅读/签到面板显示运行日志</label>
+            <p class="setting-description">在底部显示最近运行记录，方便排查签到、OAuth、阅读工具和接口请求状态。</p>
+          </div>
+          <label class="reading-switch" title="开启后在阅读、签到面板底部显示运行日志（设置面板不显示）">
+            <input type="checkbox" id="show-logs-panel">
             <span></span>
           </label>
         </div>
@@ -158,6 +448,17 @@
           <input type="time" id="schedule-time" value="09:00">
         </div>
       </div>
+    </div>
+
+    <div id="log-section" class="section log-section" hidden>
+      <div class="log-header">
+        <h2>运行日志</h2>
+        <div class="log-actions">
+          <button id="copy-logs" class="btn-text">复制</button>
+          <button id="clear-logs" class="btn-text">清空</button>
+        </div>
+      </div>
+      <div id="log-area" class="log-area"></div>
     </div>
   </div>
   <script type="module" src="popup.js"></script>

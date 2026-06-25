@@ -1,6 +1,9 @@
 (function () {
   "use strict";
 
+  // 防重入：内容脚本可能由 manifest 的 content_scripts（document_idle）注入一次，
+  // 再由 popup 通过 chrome.scripting.executeScript 注入一次。重复注入会导致
+  // 重复注册消息监听器、重复绑定事件、state 被重置，进而出现"开始按钮无响应"等问题。
   if (window.__linuxdoReadingHelperLoaded) return;
   window.__linuxdoReadingHelperLoaded = true;
 
@@ -14,8 +17,11 @@
   };
 
   const DEFAULT_CONFIG = {
-    base64DecoderEnabled: false
+    base64DecoderEnabled: false,
+    sensitiveScanEnabled: true,
+    currentTopicEnhanceEnabled: true
   };
+  const UNREAD_REFRESH_INTERVAL = 2 * 60 * 1000;
 
   const SPEEDS = {
     randomSlow: { minDelay: 1800, maxDelay: 3300, minStep: 120, maxStep: 260 },
@@ -34,11 +40,161 @@
     noMarkerSince: 0,
     lastScrollY: -1,
     samePositionTicks: 0,
-    status: "idle"
+    status: "idle",
+    sensitiveRisks: []
   };
 
   function isTopicPage() {
     return location.hostname === "linux.do" && /^\/t\//.test(location.pathname);
+  }
+
+  function getTopicIdFromPath() {
+    const match = location.pathname.match(/^\/t\/(?:[^/]+\/)?(\d+)/);
+    return match ? Number(match[1]) : null;
+  }
+
+  function getCurrentPostNumberFromPath() {
+    const match = location.pathname.match(/^\/t\/(?:[^/]+\/)?\d+\/(\d+)/);
+    return match ? Number(match[1]) : null;
+  }
+
+  function getTopicTitle() {
+    const title =
+      document.querySelector("meta[property='og:title']")?.content ||
+      document.querySelector("h1 .fancy-title, h1, .topic-title h1")?.textContent ||
+      document.title ||
+      "";
+    return String(title).replace(/\s+-\s+Linux\.do.*$/i, "").trim();
+  }
+
+  function getCanonicalTopicUrl(topicId) {
+    const canonical = document.querySelector("link[rel='canonical']")?.href;
+    if (canonical && canonical.includes("/t/")) return canonical;
+    return topicId ? `${location.origin}/t/topic/${topicId}` : location.href;
+  }
+
+  function getCurrentTopicContext() {
+    const topicId = getTopicIdFromPath();
+    return {
+      ok: true,
+      isTopicPage: isTopicPage(),
+      title: getTopicTitle(),
+      url: location.href,
+      canonicalUrl: getCanonicalTopicUrl(topicId),
+      topicId,
+      currentPostNumber: getCurrentPostNumberFromPath()
+    };
+  }
+
+  function getClosestPostNumber(element) {
+    const post = element?.closest?.("[data-post-number], article[id*='post_'], .topic-post");
+    const explicit = post?.getAttribute?.("data-post-number");
+    if (explicit) return Number(explicit) || null;
+    const id = post?.id || "";
+    const match = id.match(/post_(\d+)/);
+    return match ? Number(match[1]) : null;
+  }
+
+  function classifyResourceUrl(url) {
+    const value = String(url || "").toLowerCase();
+    if (/github\.com|gist\.github\.com/.test(value)) return "github";
+    if (/\.(png|jpe?g|gif|webp|svg|avif)(\?|#|$)/.test(value) || /\/uploads\//.test(value)) return "image";
+    if (/docs\.|developer\.|readme|wiki|notion\.site|notion\.so|yuque|feishu|larksuite|gitbook|mdn|doc/.test(value)) return "docs";
+    if (/pan\.baidu|aliyundrive|alipan|115\.com|123pan|cloud\.189|lanzou|drive\.google|dropbox|onedrive/.test(value)) return "cloud-drive";
+    if (/\/api\/|api\.|openapi|swagger|graphql/.test(value)) return "api";
+    if (/\.(zip|rar|7z|tar|gz|exe|dmg|pkg|apk|ipa|pdf|docx?|xlsx?|pptx?)(\?|#|$)/.test(value) || /download|release|attachment/.test(value)) return "download";
+    return "other";
+  }
+
+  function extractCurrentTopicResources() {
+    if (!isTopicPage()) {
+      return { ok: true, isTopicPage: false, links: [], codeBlocks: [] };
+    }
+
+    const roots = Array.from(document.querySelectorAll(".topic-post .cooked, article .cooked, .cooked"));
+    const scope = roots.length ? roots : [document.querySelector("#main-outlet") || document.body].filter(Boolean);
+    const seenUrls = new Set();
+    const links = [];
+
+    for (const root of scope) {
+      for (const anchor of root.querySelectorAll("a[href]")) {
+        const href = anchor.href;
+        if (!href || seenUrls.has(href)) continue;
+        if (!/^https?:\/\//i.test(href)) continue;
+        seenUrls.add(href);
+        links.push({
+          type: classifyResourceUrl(href),
+          text: (anchor.textContent || href).trim().slice(0, 160),
+          url: href,
+          postNumber: getClosestPostNumber(anchor)
+        });
+      }
+    }
+
+    const codeBlocks = [];
+    const seenCode = new Set();
+    for (const root of scope) {
+      for (const block of root.querySelectorAll("pre code, pre, code")) {
+        const text = (block.textContent || "").trim();
+        if (!text || text.length < 2 || seenCode.has(text)) continue;
+        seenCode.add(text);
+        const classText = String(block.className || "");
+        const language = (classText.match(/language-([A-Za-z0-9_+-]+)/)?.[1] || "").trim();
+        codeBlocks.push({
+          language,
+          text: text.slice(0, 12000),
+          postNumber: getClosestPostNumber(block)
+        });
+        if (codeBlocks.length >= 80) break;
+      }
+    }
+
+    return { ok: true, isTopicPage: true, links: links.slice(0, 200), codeBlocks };
+  }
+
+  function normalizeUnreadCount(value) {
+    const count = Number(value);
+    if (!Number.isFinite(count)) return null;
+    return Math.max(0, Math.floor(count));
+  }
+
+  function getUnreadCountFromCurrentUser(currentUser) {
+    if (!currentUser || typeof currentUser !== "object") return null;
+    for (const field of [
+      "all_unread_notifications_count",
+      "unread_notifications",
+      "unread_notification_count",
+      "unread_high_priority_notifications"
+    ]) {
+      const count = normalizeUnreadCount(currentUser[field]);
+      if (count !== null) return count;
+    }
+    return null;
+  }
+
+  async function refreshLinuxdoUnread() {
+    try {
+      const response = await fetch("/session/current.json", {
+        method: "GET",
+        credentials: "include",
+        cache: "no-store",
+        headers: { Accept: "application/json" }
+      });
+      if (!response.ok) return;
+
+      const data = await response.json();
+      const currentUser = data?.current_user || data?.currentUser || null;
+      const count = currentUser ? getUnreadCountFromCurrentUser(currentUser) : 0;
+      if (count === null) return;
+
+      const result = chrome.runtime.sendMessage({
+        action: "linuxdoUnreadDetected",
+        count
+      });
+      if (result && typeof result.catch === "function") result.catch(() => {});
+    } catch (error) {
+      // 网络或 Cloudflare 状态不稳定时保留上一次已知数量。
+    }
   }
 
   function clampNumber(value, min, max, fallback) {
@@ -60,7 +216,9 @@
     return {
       ...DEFAULT_CONFIG,
       ...(raw || {}),
-      base64DecoderEnabled: raw?.base64DecoderEnabled === true
+      base64DecoderEnabled: raw?.base64DecoderEnabled === true,
+      sensitiveScanEnabled: raw?.sensitiveScanEnabled !== false,
+      currentTopicEnhanceEnabled: raw?.currentTopicEnhanceEnabled !== false
     };
   }
 
@@ -467,6 +625,136 @@
     }
   }
 
+  const SENSITIVE_RULES = [
+    { type: "openai-key", pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g, severity: "high", label: "疑似 OpenAI API Key" },
+    { type: "anthropic-key", pattern: /\bsk-ant-[A-Za-z0-9_-]{20,}\b/g, severity: "high", label: "疑似 Anthropic API Key" },
+    { type: "github-token", pattern: /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, severity: "high", label: "疑似 GitHub Token" },
+    { type: "bearer-token", pattern: /\bBearer\s+[A-Za-z0-9._\-+/=]{20,}\b/gi, severity: "high", label: "疑似 Bearer Token" },
+    { type: "jwt", pattern: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, severity: "high", label: "疑似 JWT" },
+    { type: "cookie", pattern: /\b(cookie|set-cookie)\s*:\s*[^;\n]{20,}/gi, severity: "high", label: "疑似 Cookie" },
+    { type: "authorization-header", pattern: /\bauthorization\s*:\s*[^\n]{12,}/gi, severity: "high", label: "疑似 Authorization Header" },
+    { type: "env-secret", pattern: /\b[A-Z0-9_]*(KEY|SECRET|TOKEN|PASSWORD)[A-Z0-9_]*\s*=\s*.+/g, severity: "medium", label: "疑似 .env 密钥配置" },
+    { type: "email", pattern: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, severity: "low", label: "可能包含邮箱地址" },
+    { type: "phone", pattern: /\b(?:\+?86[-\s]?)?1[3-9]\d{9}\b/g, severity: "low", label: "可能包含手机号" },
+    { type: "private-ip", pattern: /\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b/g, severity: "low", label: "可能包含内网 IP" }
+  ];
+
+  let sensitiveScanTimer = 0;
+  let sensitiveObserver = null;
+
+  function maskSensitiveValue(value) {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    if (text.length <= 12) return text;
+    const bearer = text.match(/^Bearer\s+(.+)$/i);
+    if (bearer) return `Bearer ...${bearer[1].slice(-4)}`;
+    const header = text.match(/^([A-Za-z-]+)\s*:\s*(.+)$/);
+    if (header) return `${header[1]}: ...${header[2].slice(-4)}`;
+    const env = text.match(/^([A-Z0-9_]+)\s*=\s*(.+)$/);
+    if (env) return `${env[1]}=...${env[2].slice(-4)}`;
+    return `${text.slice(0, Math.min(6, Math.ceil(text.length / 3)))}...${text.slice(-4)}`;
+  }
+
+  function detectSensitiveText(text) {
+    const source = String(text || "");
+    if (!source.trim()) return [];
+    const risks = [];
+
+    for (const rule of SENSITIVE_RULES) {
+      rule.pattern.lastIndex = 0;
+      const previews = [];
+      let match;
+      while ((match = rule.pattern.exec(source))) {
+        const preview = maskSensitiveValue(match[0]);
+        if (!previews.includes(preview)) previews.push(preview);
+        if (previews.length >= 5) break;
+      }
+      if (previews.length) {
+        risks.push({
+          type: rule.type,
+          severity: rule.severity,
+          label: rule.label,
+          preview: previews[0],
+          previews,
+          count: previews.length
+        });
+      }
+    }
+
+    const order = { high: 0, medium: 1, low: 2 };
+    return risks.sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
+  }
+
+  function getEditorElements() {
+    return Array.from(document.querySelectorAll([
+      "textarea",
+      ".d-editor-input",
+      "[contenteditable='true']",
+      ".ProseMirror"
+    ].join(","))).filter(isVisible);
+  }
+
+  function getEditorText() {
+    return getEditorElements()
+      .map(element => {
+        if ("value" in element) return element.value || "";
+        return element.textContent || "";
+      })
+      .join("\n");
+  }
+
+  function notifySensitiveRisks(risks) {
+    try {
+      const response = chrome.runtime.sendMessage({
+        type: "linuxdo-sensitive-scan-result",
+        risks,
+        updatedAt: Date.now()
+      });
+      if (response && typeof response.catch === "function") response.catch(() => {});
+    } catch (error) {
+      // Popup may be closed.
+    }
+  }
+
+  function runSensitiveScan() {
+    if (!state.config.sensitiveScanEnabled || location.hostname !== "linux.do") {
+      state.sensitiveRisks = [];
+      return;
+    }
+    const risks = detectSensitiveText(getEditorText());
+    const oldText = JSON.stringify(state.sensitiveRisks);
+    const newText = JSON.stringify(risks);
+    state.sensitiveRisks = risks;
+    if (oldText !== newText) notifySensitiveRisks(risks);
+  }
+
+  function scheduleSensitiveScan(delay = 250) {
+    if (!state.config.sensitiveScanEnabled) return;
+    if (sensitiveScanTimer) window.clearTimeout(sensitiveScanTimer);
+    sensitiveScanTimer = window.setTimeout(() => {
+      sensitiveScanTimer = 0;
+      runSensitiveScan();
+    }, delay);
+  }
+
+  function initSensitiveScanner() {
+    if (!state.config.sensitiveScanEnabled || sensitiveObserver) return;
+    document.addEventListener("input", () => scheduleSensitiveScan(150), true);
+    document.addEventListener("paste", () => scheduleSensitiveScan(250), true);
+    sensitiveObserver = new MutationObserver(() => scheduleSensitiveScan(400));
+    sensitiveObserver.observe(document.documentElement, { childList: true, subtree: true });
+    scheduleSensitiveScan(300);
+  }
+
+  function syncSensitiveScanner() {
+    if (state.config.sensitiveScanEnabled) {
+      initSensitiveScanner();
+      scheduleSensitiveScan(100);
+    } else {
+      state.sensitiveRisks = [];
+      notifySensitiveRisks([]);
+    }
+  }
+
   function parseRgb(color) {
     const match = String(color).match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
     if (!match) return null;
@@ -717,6 +1005,34 @@
       return true;
     }
 
+    if (message.type === "linuxdo-current-topic-get") {
+      if (!state.config.currentTopicEnhanceEnabled) {
+        sendResponse({ ok: false, isTopicPage: false, message: "当前帖子增强已关闭" });
+        return true;
+      }
+      sendResponse(getCurrentTopicContext());
+      return true;
+    }
+
+    if (message.type === "linuxdo-current-topic-extract-resources") {
+      if (!state.config.currentTopicEnhanceEnabled) {
+        sendResponse({ ok: false, isTopicPage: false, links: [], codeBlocks: [], message: "当前帖子增强已关闭" });
+        return true;
+      }
+      sendResponse(extractCurrentTopicResources());
+      return true;
+    }
+
+    if (message.type === "linuxdo-sensitive-scan-get") {
+      runSensitiveScan();
+      sendResponse({
+        ok: true,
+        risks: state.sensitiveRisks,
+        updatedAt: Date.now()
+      });
+      return true;
+    }
+
     return false;
   });
 
@@ -733,11 +1049,22 @@
     if (changes[CONFIG_KEY]) {
       state.config = normalizedConfig(changes[CONFIG_KEY].newValue);
       syncSuspiciousBase64Decoder();
+      syncSensitiveScanner();
     }
   });
 
   loadSettings(() => {
     setStatus("idle");
-    loadConfig(syncSuspiciousBase64Decoder);
+    loadConfig(() => {
+      syncSuspiciousBase64Decoder();
+      syncSensitiveScanner();
+    });
+  });
+
+  refreshLinuxdoUnread();
+  window.setInterval(refreshLinuxdoUnread, UNREAD_REFRESH_INTERVAL);
+  window.addEventListener("focus", refreshLinuxdoUnread);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refreshLinuxdoUnread();
   });
 })();

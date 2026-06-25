@@ -1,15 +1,45 @@
 import { getSites, updateSiteStatus, getConfig, saveConfig } from '../lib/storage.js';
 import { getAdapterForSite } from '../adapters/registry.js';
+import {
+  getCurrentUser,
+  getLatestTopics,
+  getTopTopics,
+  getTopicDetail,
+  getCategories,
+  normalizeCategories,
+  normalizeTopicList
+} from '../lib/linuxdo-api.js';
+import {
+  listLinuxdoKeywords,
+  saveLinuxdoKeyword,
+  deleteLinuxdoKeyword,
+  listLinuxdoKeywordMatches,
+  refreshLinuxdoKeywordMatches,
+  updateLinuxdoKeywordMatchStatus,
+  addLinuxdoReadLater as addLinuxdoReadLaterItem,
+  listLinuxdoReadLater,
+  updateLinuxdoReadLater,
+  removeLinuxdoReadLater,
+  exportLinuxdoReadLater,
+  saveLinuxdoCurrentTopicCache
+} from '../lib/linuxdo-storage.js';
 
 const LOG_KEY = 'logs';
 const MAX_LOGS = 200;
 const ALARM_NAME = 'dailyCheckin';
+const LINUXDO_UNREAD_ALARM_NAME = 'linuxdoUnread';
+const LINUXDO_UNREAD_REFRESH_MINUTES = 5;
+const LINUXDO_UNREAD_KEY = 'linuxdoUnread';
+const LINUXDO_HOME_URL = 'https://linux.do/';
 const DAY_IN_MINUTES = 24 * 60;
 const LDC_CREDIT_KEY = 'ldcCredit';
 const LDC_CREDIT_HOME_URL = 'https://credit.linux.do/home';
+const LINUXDO_CATEGORY_CACHE_TTL = 10 * 60 * 1000;
+const LINUXDO_READ_LATER_KEY = 'linuxdoReadLater';
 
 // 防止定时签到与手动签到并发（单次签到可能耗时较长）
 let scheduledRunInProgress = false;
+let linuxdoCategoryCache = null;
 
 async function log(level, message) {
   const ts = new Date().toLocaleTimeString('zh-CN');
@@ -55,6 +85,386 @@ async function scheduleAlarm() {
   log('info', `定时签到已启用：每日 ${config.scheduleTime}，约 ${delayInMinutes} 分钟后首次执行`);
 }
 
+async function scheduleLinuxdoUnreadAlarm() {
+  await chrome.alarms.create(LINUXDO_UNREAD_ALARM_NAME, {
+    delayInMinutes: 1,
+    periodInMinutes: LINUXDO_UNREAD_REFRESH_MINUTES
+  });
+}
+
+function normalizeUnreadCount(value) {
+  const count = Number(value);
+  if (!Number.isFinite(count)) return null;
+  return Math.max(0, Math.floor(count));
+}
+
+function getUnreadCountFromCurrentUser(currentUser) {
+  if (!currentUser || typeof currentUser !== 'object') return null;
+  const fields = [
+    'all_unread_notifications_count',
+    'unread_notifications',
+    'unread_notification_count',
+    'unread_high_priority_notifications'
+  ];
+  for (const field of fields) {
+    const count = normalizeUnreadCount(currentUser[field]);
+    if (count !== null) return count;
+  }
+  return null;
+}
+
+async function applyLinuxdoUnreadCount(count, source = 'background') {
+  const normalizedCount = normalizeUnreadCount(count) ?? 0;
+  const state = {
+    ok: true,
+    count: normalizedCount,
+    source,
+    updatedAt: Date.now()
+  };
+
+  await chrome.storage.local.set({ [LINUXDO_UNREAD_KEY]: state });
+  await chrome.action.setBadgeBackgroundColor({ color: '#e5484d' });
+  if (chrome.action.setBadgeTextColor) {
+    await chrome.action.setBadgeTextColor({ color: '#ffffff' });
+  }
+  await chrome.action.setBadgeText({
+    text: normalizedCount > 99 ? '99+' : (normalizedCount > 0 ? String(normalizedCount) : '')
+  });
+  await chrome.action.setTitle({
+    title: normalizedCount > 0
+      ? `佬站助手 · Linux DO 有 ${normalizedCount} 条未读消息`
+      : '佬站助手'
+  });
+
+  return state;
+}
+
+async function refreshLinuxdoUnread() {
+  const response = await fetch('https://linux.do/session/current.json', {
+    method: 'GET',
+    credentials: 'include',
+    cache: 'no-store',
+    headers: { Accept: 'application/json' }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Linux DO 返回 ${response.status}`);
+  }
+
+  const data = await response.json();
+  const currentUser = data?.current_user || data?.currentUser || null;
+  if (!currentUser) {
+    return applyLinuxdoUnreadCount(0, 'logged-out');
+  }
+
+  const count = getUnreadCountFromCurrentUser(currentUser);
+  if (count === null) {
+    throw new Error('Linux DO 没有返回未读消息数量');
+  }
+
+  return applyLinuxdoUnreadCount(count, 'background');
+}
+
+async function openLinuxdoHome() {
+  const tabs = await chrome.tabs.query({ url: ['https://linux.do/*'] });
+  let tab = tabs.find(item => item.active) || tabs[0];
+
+  if (tab?.id) {
+    tab = await chrome.tabs.update(tab.id, { url: LINUXDO_HOME_URL, active: true });
+    await focusTab(tab);
+    return { ok: true };
+  }
+
+  await chrome.tabs.create({ url: LINUXDO_HOME_URL, active: true });
+  return { ok: true };
+}
+
+function normalizeLinuxdoOpenUrl(url) {
+  const target = new URL(url || LINUXDO_HOME_URL, LINUXDO_HOME_URL);
+  if (target.origin !== LINUXDO_HOME_URL.slice(0, -1)) {
+    throw new Error('只能打开 linux.do 链接');
+  }
+  return target.href;
+}
+
+async function openLinuxdoUrl(url) {
+  const targetUrl = normalizeLinuxdoOpenUrl(url);
+  const tabs = await chrome.tabs.query({ url: ['https://linux.do/*'] });
+  let tab = tabs.find(item => item.url === targetUrl) || tabs.find(item => item.active) || tabs[0];
+
+  if (tab?.id) {
+    tab = await chrome.tabs.update(tab.id, { url: targetUrl, active: true });
+    await focusTab(tab);
+    return { ok: true, url: targetUrl };
+  }
+
+  await chrome.tabs.create({ url: targetUrl, active: true });
+  return { ok: true, url: targetUrl };
+}
+
+async function getLinuxdoCurrentUserStatus() {
+  return getCurrentUser();
+}
+
+async function findLinuxdoApiFallbackTab() {
+  const tabs = await chrome.tabs.query({ url: ['https://linux.do/*'] });
+  return tabs.find(tab => {
+    if (!tab?.id || !tab.url) return false;
+    return !tab.url.includes('/cdn-cgi/') && !tab.url.includes('challenge');
+  }) || null;
+}
+
+async function getLinuxdoApiFallbackTab() {
+  const existingTab = await findLinuxdoApiFallbackTab();
+  if (existingTab?.id) {
+    return { tab: existingTab, created: false };
+  }
+
+  const tab = await chrome.tabs.create({ url: LINUXDO_HOME_URL, active: false });
+  await waitForTabLoadQuiet(tab.id, 30000);
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  return { tab, created: true };
+}
+
+async function fetchLinuxdoJsonFromTab(path) {
+  const { tab, created } = await getLinuxdoApiFallbackTab();
+  if (!tab?.id) {
+    throw new Error('后台请求被 Linux.do 拒绝，且无法创建临时读取页面');
+  }
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      func: async (requestPath) => {
+        const pageText = document.body?.innerText || '';
+        const pageTitle = document.title || '';
+        if (
+          /just a moment|checking your browser|enable javascript and cookies/i.test(pageTitle + '\n' + pageText) ||
+          location.pathname.includes('/cdn-cgi/')
+        ) {
+          return {
+            ok: false,
+            status: 403,
+            message: 'Linux.do 需要先完成 Cloudflare 验证，插件无法静默绕过'
+          };
+        }
+
+        const response = await fetch(requestPath, {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
+          headers: { Accept: 'application/json' }
+        });
+        const text = await response.text();
+        if (!response.ok) {
+          return {
+            ok: false,
+            status: response.status,
+            message: `Linux.do 页面内请求返回 ${response.status}`,
+            preview: text.slice(0, 160)
+          };
+        }
+        try {
+          return { ok: true, data: JSON.parse(text) };
+        } catch {
+          return {
+            ok: false,
+            status: 0,
+            message: 'Linux.do 页面内请求没有返回 JSON',
+            preview: text.slice(0, 160)
+          };
+        }
+      },
+      args: [path]
+    });
+
+    const result = results?.[0]?.result;
+    if (!result?.ok) {
+      throw new Error(result?.message || 'Linux.do 页面内请求失败');
+    }
+    return result.data;
+  } finally {
+    if (created) {
+      try { await chrome.tabs.remove(tab.id); } catch {}
+    }
+  }
+}
+
+function shouldFallbackToLinuxdoTab(error) {
+  return error?.status === 403 || /403|Failed to fetch|NetworkError/i.test(error?.message || '');
+}
+
+function getLinuxdoCategoryMap(categories) {
+  return new Map((categories || []).map(category => [String(category.id), category]));
+}
+
+function decorateLinuxdoTopicsWithCategories(topics, categories) {
+  const categoryMap = getLinuxdoCategoryMap(categories);
+  return (topics || []).map(topic => {
+    const category = categoryMap.get(String(topic.categoryId));
+    if (!category) return topic;
+    return {
+      ...topic,
+      categoryName: topic.categoryName || category.name,
+      categorySlug: category.slug || ''
+    };
+  });
+}
+
+async function getLinuxdoCategoryList({ force = false } = {}) {
+  const now = Date.now();
+  if (
+    !force &&
+    linuxdoCategoryCache?.categories?.length &&
+    now - linuxdoCategoryCache.updatedAt < LINUXDO_CATEGORY_CACHE_TTL
+  ) {
+    return linuxdoCategoryCache;
+  }
+
+  try {
+    const categories = await getCategories();
+    linuxdoCategoryCache = {
+      ok: true,
+      categories,
+      source: 'background',
+      updatedAt: Date.now()
+    };
+    return linuxdoCategoryCache;
+  } catch (error) {
+    if (!shouldFallbackToLinuxdoTab(error)) throw error;
+    log('warn', `Linux.do 分类后台请求失败，尝试页面内兜底: ${error.message}`);
+    const data = await fetchLinuxdoJsonFromTab('/site.json');
+    const categories = normalizeCategories(data);
+    linuxdoCategoryCache = {
+      ok: true,
+      categories,
+      source: 'tab-fallback',
+      updatedAt: Date.now()
+    };
+    return linuxdoCategoryCache;
+  }
+}
+
+async function getLinuxdoLatestTopicList(limit) {
+  const safeLimit = Number(limit) || 10;
+  const categoryState = await getLinuxdoCategoryList().catch(error => {
+    log('warn', `Linux.do 分类读取失败，主题将不显示分类名: ${error.message}`);
+    return { ok: false, categories: [], source: 'error' };
+  });
+  try {
+    const topics = await getLatestTopics({ limit: safeLimit });
+    return {
+      ok: true,
+      topics: decorateLinuxdoTopicsWithCategories(topics, categoryState.categories),
+      categories: categoryState.categories,
+      source: 'background',
+      updatedAt: Date.now()
+    };
+  } catch (error) {
+    if (!shouldFallbackToLinuxdoTab(error)) throw error;
+    log('warn', `Linux.do 最新主题后台请求失败，尝试页面内兜底: ${error.message}`);
+    const data = await fetchLinuxdoJsonFromTab('/latest.json');
+    const topics = normalizeTopicList(data, categoryState.categories).slice(0, safeLimit);
+    return {
+      ok: true,
+      topics: decorateLinuxdoTopicsWithCategories(topics, categoryState.categories),
+      categories: categoryState.categories,
+      source: 'tab-fallback',
+      updatedAt: Date.now()
+    };
+  }
+}
+
+async function getLinuxdoTopTopicList(period, limit) {
+  const safeLimit = Number(limit) || 10;
+  const safePeriod = ['daily', 'weekly', 'monthly', 'yearly', 'all'].includes(period) ? period : 'daily';
+  const categoryState = await getLinuxdoCategoryList().catch(error => {
+    log('warn', `Linux.do 分类读取失败，主题将不显示分类名: ${error.message}`);
+    return { ok: false, categories: [], source: 'error' };
+  });
+  try {
+    const topics = await getTopTopics({ period: safePeriod, limit: safeLimit });
+    return {
+      ok: true,
+      topics: decorateLinuxdoTopicsWithCategories(topics, categoryState.categories),
+      categories: categoryState.categories,
+      source: 'background',
+      updatedAt: Date.now()
+    };
+  } catch (error) {
+    if (!shouldFallbackToLinuxdoTab(error)) throw error;
+    log('warn', `Linux.do 热门主题后台请求失败，尝试页面内兜底: ${error.message}`);
+    const data = await fetchLinuxdoJsonFromTab(`/top.json?period=${encodeURIComponent(safePeriod)}`);
+    const topics = normalizeTopicList(data, categoryState.categories).slice(0, safeLimit);
+    return {
+      ok: true,
+      topics: decorateLinuxdoTopicsWithCategories(topics, categoryState.categories),
+      categories: categoryState.categories,
+      source: 'tab-fallback',
+      updatedAt: Date.now()
+    };
+  }
+}
+
+async function getLinuxdoTopicDetail(topicId) {
+  if (!topicId) throw new Error('缺少 topicId');
+  return {
+    ok: true,
+    topic: await getTopicDetail(topicId),
+    updatedAt: Date.now()
+  };
+}
+
+function normalizeLinuxdoReadLaterTopic(topic = {}) {
+  if (!topic.url) throw new Error('缺少主题 URL');
+  return {
+    topicId: topic.id ?? topic.topicId ?? null,
+    title: topic.title || '未命名主题',
+    url: normalizeLinuxdoOpenUrl(topic.url),
+    categoryName: topic.categoryName || '',
+    categoryId: topic.categoryId ?? null,
+    tags: Array.isArray(topic.tags) ? topic.tags : []
+  };
+}
+
+async function addLinuxdoReadLater(topic) {
+  const normalized = normalizeLinuxdoReadLaterTopic(topic);
+  const result = await chrome.storage.local.get(LINUXDO_READ_LATER_KEY);
+  const items = Array.isArray(result[LINUXDO_READ_LATER_KEY]) ? result[LINUXDO_READ_LATER_KEY] : [];
+  const now = Date.now();
+  const existing = items.find(item => (
+    (normalized.topicId != null && String(item.topicId) === String(normalized.topicId)) ||
+    item.url === normalized.url
+  ));
+
+  if (existing) {
+    Object.assign(existing, {
+      ...normalized,
+      note: existing.note || '',
+      customTags: Array.isArray(existing.customTags) ? existing.customTags : [],
+      status: existing.status || 'unread',
+      addedAt: existing.addedAt || now,
+      updatedAt: now
+    });
+    await chrome.storage.local.set({ [LINUXDO_READ_LATER_KEY]: items });
+    return { ok: true, item: existing, created: false, message: '已更新稍后读' };
+  }
+
+  const item = {
+    id: `rl_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    ...normalized,
+    note: '',
+    customTags: [],
+    status: 'unread',
+    addedAt: now,
+    updatedAt: now
+  };
+  items.unshift(item);
+  await chrome.storage.local.set({ [LINUXDO_READ_LATER_KEY]: items });
+  return { ok: true, item, created: true, message: '已加入稍后读' };
+}
+
 // 签到完成后的桌面通知
 function notifyResults(results) {
   const total = results.length;
@@ -76,7 +486,12 @@ function notifyResults(results) {
 
 // 闹钟触发：后台静默执行全部签到
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (!alarm || alarm.name !== ALARM_NAME) return;
+  if (!alarm) return;
+  if (alarm.name === LINUXDO_UNREAD_ALARM_NAME) {
+    refreshLinuxdoUnread().catch(() => {});
+    return;
+  }
+  if (alarm.name !== ALARM_NAME) return;
   if (scheduledRunInProgress) {
     log('warn', '定时签到触发，但上一次签到仍在进行，跳过本次');
     return;
@@ -99,8 +514,16 @@ chrome.alarms.onAlarm.addListener(alarm => {
 });
 
 // 浏览器启动 / 扩展安装更新时重建闹钟
-chrome.runtime.onInstalled.addListener(() => { scheduleAlarm(); });
-chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); });
+chrome.runtime.onInstalled.addListener(() => {
+  scheduleAlarm();
+  scheduleLinuxdoUnreadAlarm();
+  refreshLinuxdoUnread().catch(() => {});
+});
+chrome.runtime.onStartup.addListener(() => {
+  scheduleAlarm();
+  scheduleLinuxdoUnreadAlarm();
+  refreshLinuxdoUnread().catch(() => {});
+});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.action) return false;
@@ -153,6 +576,133 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.action === 'openLdcCredit') {
     openLdcCreditPage()
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
+  if (message.action === 'refreshLinuxdoUnread') {
+    refreshLinuxdoUnread()
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoUnreadDetected') {
+    applyLinuxdoUnreadCount(message.count, 'content')
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
+  if (message.action === 'openLinuxdoHome') {
+    openLinuxdoHome()
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoGetCurrentUser') {
+    getLinuxdoCurrentUserStatus()
+      .then(sendResponse)
+      .catch(err => sendResponse({
+        ok: false,
+        loggedIn: false,
+        unreadCount: 0,
+        privateMessageCount: 0,
+        message: err.message,
+        updatedAt: Date.now()
+      }));
+    return true;
+  }
+  if (message.action === 'linuxdoGetLatestTopics') {
+    getLinuxdoLatestTopicList(message.limit)
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, topics: [], message: err.message, updatedAt: Date.now() }));
+    return true;
+  }
+  if (message.action === 'linuxdoGetTopTopics') {
+    getLinuxdoTopTopicList(message.period, message.limit)
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, topics: [], message: err.message, updatedAt: Date.now() }));
+    return true;
+  }
+  if (message.action === 'linuxdoGetTopicDetail') {
+    getLinuxdoTopicDetail(message.topicId)
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message, updatedAt: Date.now() }));
+    return true;
+  }
+  if (message.action === 'linuxdoOpenUrl') {
+    openLinuxdoUrl(message.url)
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoAddReadLater') {
+    addLinuxdoReadLaterItem(message.topic, message.patch || {})
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoListReadLater') {
+    listLinuxdoReadLater()
+      .then(items => sendResponse({ ok: true, items, updatedAt: Date.now() }))
+      .catch(err => sendResponse({ ok: false, items: [], message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoUpdateReadLater') {
+    updateLinuxdoReadLater(message.id, message.patch || {})
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoRemoveReadLater') {
+    removeLinuxdoReadLater(message.id)
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoExportReadLater') {
+    exportLinuxdoReadLater(message.format)
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoGetKeywords') {
+    Promise.all([listLinuxdoKeywords(), listLinuxdoKeywordMatches()])
+      .then(([keywords, matches]) => sendResponse({ ok: true, keywords, matches, updatedAt: Date.now() }))
+      .catch(err => sendResponse({ ok: false, keywords: [], matches: [], message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoSaveKeyword') {
+    saveLinuxdoKeyword(message.keyword || { text: message.text, enabled: message.enabled })
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoDeleteKeyword') {
+    deleteLinuxdoKeyword(message.id)
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoRefreshKeywordMatches') {
+    getLinuxdoLatestTopicList(message.limit || 50)
+      .then(topicState => refreshLinuxdoKeywordMatches(topicState.topics || [])
+        .then(result => ({
+          ...result,
+          source: topicState.source,
+          topicCount: topicState.topics?.length || 0
+        })))
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, keywords: [], matches: [], message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoUpdateKeywordMatchStatus') {
+    updateLinuxdoKeywordMatchStatus(message.id, message.status)
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, message: err.message }));
+    return true;
+  }
+  if (message.action === 'linuxdoSaveCurrentTopicCache') {
+    saveLinuxdoCurrentTopicCache(message.cache || {})
       .then(sendResponse)
       .catch(err => sendResponse({ ok: false, message: err.message }));
     return true;
@@ -244,6 +794,8 @@ async function refreshLdcCredit() {
   let tab = await findLdcCreditTab();
   let createdTab = false;
 
+  // 新建/复用 tab 但保持后台隐藏，不打扰用户当前浏览。
+  // LDC 的数据接口返回真实值，扩展直接 fetch 接口解析即可，无需让 tab 可见。
   if (!tab?.id) {
     tab = await chrome.tabs.create({ url: LDC_CREDIT_HOME_URL, active: false });
     createdTab = true;
@@ -252,16 +804,68 @@ async function refreshLdcCredit() {
   }
 
   await waitForTabLoadQuiet(tab.id, 35000);
-  await new Promise(resolve => setTimeout(resolve, 2000));
 
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: scrapeLdcCreditPage
-  });
+  // 后台隐藏 tab 下 DOM 数值会停在 0.00（React 不 commit 状态更新），
+  // 但 LDC 的数据接口返回真实值。优先直接 fetch 接口解析，DOM scrape 仅作兜底。
+  let result = null;
+  const maxAttempts = 6;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, attempt === 0 ? 2500 : 2000));
+
+    // 优先走接口
+    try {
+      const apiResults = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'MAIN',
+        func: fetchLdcCreditFromApi
+      });
+      const apiData = apiResults?.[0]?.result;
+      if (apiData) {
+        log('info', `LDC 接口抓取(第${attempt + 1}次): status=${apiData.status}, ok=${apiData.ok}, available="${apiData.availableLdc ?? ''}", sevenDay="${apiData.sevenDayIncome ?? ''}", yesterday="${apiData.yesterdayIncome ?? ''}"`);
+        // cloudflare / login-required 是页面状态问题，重试无意义，直接退出并记录最终结果
+        if (apiData.status === 'cloudflare' || apiData.status === 'login-required') {
+          result = apiData;
+          break;
+        }
+        if (apiData.ok) {
+          result = apiData;
+          break;
+        }
+      }
+    } catch (scriptErr) {
+      log('warn', `LDC 接口抓取异常(第${attempt + 1}次): ${scriptErr.message}`);
+    }
+
+    // 接口未取到时，用 DOM scrape 兜底（前台已加载过数据的 tab 可能 DOM 有值）
+    if (!result) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: scrapeLdcCreditPage
+        });
+        const scraped = results?.[0]?.result;
+        if (scraped) {
+          log('info', `LDC DOM 抓取(第${attempt + 1}次): status=${scraped.status}, ok=${scraped.ok}, available="${scraped.availableLdc ?? ''}"`);
+          if (scraped.status === 'cloudflare' || scraped.status === 'login-required' || scraped.status === 'need-start') {
+            result = scraped;
+            break;
+          }
+          if (scraped.ok && String(scraped.availableLdc || '').trim() !== '0.00') {
+            result = scraped;
+            break;
+          }
+          // DOM 仍是 0.00，保留最后一次结果供兜底，继续重试
+          if (!result) result = scraped;
+        }
+      } catch (scriptErr) {
+        log('warn', `LDC DOM 抓取异常(第${attempt + 1}次): ${scriptErr.message}`);
+      }
+    }
+  }
 
   const currentTab = await chrome.tabs.get(tab.id).catch(() => tab);
-  const result = {
-    ...(results?.[0]?.result || {
+  result = {
+    ...(result || {
       ok: false,
       status: 'no-response',
       message: 'LDC 页面没有返回可读取结果'
@@ -272,15 +876,98 @@ async function refreshLdcCredit() {
 
   await chrome.storage.local.set({ [LDC_CREDIT_KEY]: result });
 
+  if (!result.ok) {
+    log('warn', `LDC 抓取失败: status=${result.status}, message=${result.message}`);
+  } else {
+    log('info', `LDC 刷新完成: available=${result.availableLdc}, sevenDay=${result.sevenDayIncome}, yesterday=${result.yesterdayIncome}`);
+  }
+
+  // 抓到真实数据：若是本次新建的后台 tab，用完即关，不打扰用户；
+  // 抓不到（Cloudflare/未登录/未开始）：保持该 tab 存在，但不抢焦点（避免反复打断用户），
+  // 由用户在需要时自行查看。用户已有的 tab 一律不关闭。
   if (result.ok && createdTab) {
     try { await chrome.tabs.remove(tab.id); } catch {}
   }
 
-  if (!result.ok && currentTab?.id) {
-    await focusTab(currentTab);
+  return result;
+}
+
+// 直接 fetch LDC 的数据接口拿 JSON 解析，绕开 DOM 渲染和可见性检测。
+// 后台隐藏 tab 下 React 可能不 commit 状态更新，DOM 数值停在 0.00，
+// 但接口本身返回真实数据（已验证 userInfo.data.available_balance 为真实额度）。
+// 在页面 MAIN world 执行，同源 + credentials:include，复用页面的登录态和 Cloudflare 通行证。
+async function fetchLdcCreditFromApi() {
+  const tryFetch = async (url) => {
+    const r = await fetch(url, { credentials: 'include', headers: { 'Accept': 'application/json' } });
+    if (!r.ok) return null;
+    try { return await r.json(); } catch { return null; }
+  };
+
+  // Cloudflare 挑战页 / 未登录：接口会返回非 JSON 或 401/403
+  const title = (document.title || '').toLowerCase();
+  if (title.includes('just a moment')) {
+    return { ok: false, status: 'cloudflare', message: '需要先在 LDC 页面完成 Cloudflare 验证' };
+  }
+  if (location.pathname.includes('/login')) {
+    return { ok: false, status: 'login-required', message: '需要先登录 credit.linux.do' };
   }
 
-  return result;
+  const userInfo = await tryFetch('/api/v1/oauth/user-info');
+  if (!userInfo || userInfo.status === 401 || userInfo.status === 403 || !userInfo.data) {
+    return { ok: false, status: 'login-required', message: '需要先登录 credit.linux.do' };
+  }
+
+  const balance = userInfo.data.available_balance;
+  // available_balance 缺失或无法解析为数字时视为未取到
+  const availableLdc = balance != null ? String(balance) : '';
+
+  // daily 接口返回最近 N 天每日收入，从中取昨日和 7 天总计
+  let yesterdayIncome = '';
+  let sevenDayIncome = '';
+  const daily = await tryFetch('/api/v1/dashboard/stats/daily?days=7');
+  if (daily && Array.isArray(daily.data)) {
+    // 取今天的数据行作为昨日收入（LDC 的 daily 含今日累计）
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const rows = daily.data;
+    // 总计
+    let total = 0;
+    let counted = false;
+    for (const row of rows) {
+      const amount = Number(row.amount ?? row.income ?? row.value ?? row.credits);
+      if (Number.isFinite(amount)) { total += amount; counted = true; }
+    }
+    if (counted) sevenDayIncome = total.toFixed(2);
+
+    // 昨日收入：找日期为今天的前一行，或字段名含 yesterday
+    for (const row of rows) {
+      const dateStr = String(row.date ?? row.day ?? '').slice(0, 10);
+      if (dateStr === todayStr) {
+        const amount = Number(row.amount ?? row.income ?? row.value ?? row.credits);
+        if (Number.isFinite(amount)) { yesterdayIncome = (amount >= 0 ? '+' : '') + amount.toFixed(2); }
+        break;
+      }
+    }
+    // 兜底：若接口有 yesterday 字段
+    if (!yesterdayIncome && daily.data?.yesterday != null) {
+      const y = Number(daily.data.yesterday);
+      if (Number.isFinite(y)) yesterdayIncome = (y >= 0 ? '+' : '') + y.toFixed(2);
+    }
+  }
+
+  if (availableLdc || yesterdayIncome || sevenDayIncome) {
+    return {
+      ok: true,
+      status: 'ok',
+      message: 'LDC 已刷新（接口）',
+      availableLdc,
+      sevenDayIncome,
+      yesterdayIncome,
+      source: 'api'
+    };
+  }
+
+  return { ok: false, status: 'no-data', message: 'LDC 接口未返回有效数据' };
 }
 
 function scrapeLdcCreditPage() {
@@ -572,14 +1259,21 @@ function scrapeLdcCreditPage() {
     ]
   );
 
-  if (availableLdc || sevenDayIncome || yesterdayIncome) {
+  // 注意：LDC 的可用额度 / 7天总计 / 今日剩余真实值就可能是 0.00（用户确实没额度），
+  // 这是有效数据，必须如实显示，不能当作占位过滤掉。只要 scrape 抓到了数字字符串即有效。
+  const isMeaningful = (value) => {
+    const text = String(value || '').trim();
+    return !!text;
+  };
+
+  if (isMeaningful(availableLdc) || isMeaningful(sevenDayIncome) || isMeaningful(yesterdayIncome)) {
     return {
       ok: true,
       status: 'ok',
       message: 'LDC 已刷新',
-      availableLdc,
-      sevenDayIncome,
-      yesterdayIncome
+      availableLdc: availableLdc || '',
+      sevenDayIncome: sevenDayIncome || '',
+      yesterdayIncome: yesterdayIncome || ''
     };
   }
 
@@ -610,6 +1304,13 @@ async function handleCheckinAll(options = {}) {
   const results = [];
 
   for (const site of sites) {
+    if (site.enabled === false) {
+      const result = { site, success: true, skipped: true, message: '已停用，跳过签到' };
+      log('info', `跳过已停用站点: ${site.name} (${site.url})`);
+      results.push(result);
+      continue;
+    }
+
     log('info', `正在签到: ${site.name} (${site.url})`);
     const result = await doCheckin(site, options);
     log(result.success ? 'info' : 'error', `${site.name}: ${result.message}`);
@@ -623,6 +1324,9 @@ async function handleCheckinSingle(siteId) {
   const sites = await getSites();
   const site = sites.find(s => s.id === siteId);
   if (!site) return { success: false, message: '站点不存在' };
+  if (site.enabled === false) {
+    return { site, success: true, skipped: true, message: '已停用，跳过签到' };
+  }
   return doCheckin(site);
 }
 
@@ -729,11 +1433,12 @@ async function doFlowCheckin(site, adapter, options = {}) {
                 return { success: false, message: stateJson.message || '获取 OAuth state 失败' };
               }
 
-              const state = `${stateJson.data}|${btoa(window.location.host)}`;
+              // state 必须原样使用，不能拼接任何后缀——new-api 回调时要求
+              // query.state === session.oauth_state，拼接会导致 "state 参数为空或不匹配"。
               const authUrl = new URL('https://connect.linux.do/oauth2/authorize');
               authUrl.searchParams.set('response_type', 'code');
               authUrl.searchParams.set('client_id', clientId);
-              authUrl.searchParams.set('state', state);
+              authUrl.searchParams.set('state', stateJson.data);
               return { success: true, authUrl: authUrl.toString() };
             },
             args: [step.clientId]
@@ -1412,7 +2117,7 @@ async function doFlowCheckin(site, adapter, options = {}) {
 
           sawAuthorizePage = sawAuthorizePage || url.includes('authorize') || url.includes('oauth') || url.includes('linux.do');
 
-          if ((url.includes('/login') || url.includes('/signin')) && !sawAuthorizePage) {
+          if ((url.includes('/login') || url.includes('/signin') || url.includes('/sign-in')) && !sawAuthorizePage) {
             try {
               const results = await chrome.scripting.executeScript({
                 target: { tabId: tab.id },
@@ -1736,6 +2441,20 @@ async function doFlowCheckin(site, adapter, options = {}) {
 
         if (result.action === 'error') {
           throw new Error(result.message);
+        }
+
+        if (result.action === 'navigate') {
+          // 适配器在页面上下文中拿到了应跳转地址（例如 hook 到 window.open 的 OAuth 弹窗 URL），
+          // 交给 service worker 主动导航当前 tab，绕开浏览器对脚本点击触发弹窗的拦截。
+          const targetUrl = result.url;
+          if (!targetUrl) {
+            throw new Error(result.message || 'navigate 动作缺少目标 URL');
+          }
+          log('info', `脚本请求导航到: ${targetUrl}`);
+          await chrome.tabs.update(tab.id, { url: targetUrl });
+          await waitForTabLoad(tab.id, 30000);
+          await new Promise(r => setTimeout(r, 1500));
+          continue;
         }
 
         if (result.action === 'continue') {

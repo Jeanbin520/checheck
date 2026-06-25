@@ -148,34 +148,122 @@ async function runChybenzunCheckin() {
   return { action: 'done', success: false, message };
 }
 
+// 在 /sign-in 页面触发 LinuxDO OAuth 登录。
+// 脚本注入的 click() 不是真实用户手势，浏览器会拦截由此触发的 window.open() 弹窗，
+// 导致 OAuth 页打不开、URL 一直停在登录页。这里通过多级兜底拿到 OAuth 授权地址，
+// 再用新动作 `navigate` 把 URL 交给 service worker 用 chrome.tabs.update 主动导航。
 async function clickChybenzunLinuxdoLogin() {
   if (!window.location.pathname.includes('/sign-in')) {
     return { action: 'continue', message: '当前不在登录页，跳过 LinuxDO 登录' };
   }
 
-  const candidates = Array.from(document.querySelectorAll('button, a, [role="button"]'));
-  const button = candidates.find((el) => {
-    const text = (el.textContent || '').trim().toLowerCase().replace(/\s+/g, ' ');
-    const href = (el.getAttribute('href') || '').toLowerCase();
-    const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
-    return !disabled && (
-      text.includes('使用 linuxdo 继续') ||
-      text.includes('linuxdo') ||
-      href.includes('linuxdo')
-    );
-  });
+  const LINUXDO_TEXTS = ['使用 linuxdo 继续', 'linuxdo', 'linux do', 'linux.do', 'oauth'];
+  const LINUXDO_HREFS = ['linuxdo', 'oauth', 'connect.linux.do'];
 
-  if (!button) {
-    return {
-      action: 'error',
-      message: '未找到 LinuxDO 登录按钮'
-    };
+  // SPA 登录页按钮可能是 button/a，也可能是可点击的 div/span（React/Semi UI 常见）。
+  function collectLinuxdoControls() {
+    const selector = 'button, a, [role="button"], input[type="button"], input[type="submit"], div, span';
+    const elements = Array.from(document.querySelectorAll(selector));
+    return elements.filter((el) => {
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+      // div/span 自身没有行为，必须是带文本的叶节点，避免命中整个大容器
+      const tag = el.tagName.toLowerCase();
+      if (tag === 'div' || tag === 'span') {
+        if (rect.width > 600 || rect.height > 120) return false;
+        if (el.childElementCount > 3) return false;
+      }
+      const text = (el.textContent || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      const href = (el.getAttribute('href') || '').toLowerCase();
+      const label = (el.getAttribute('aria-label') || el.getAttribute('title') || '').toLowerCase();
+      const all = `${text} ${href} ${label}`;
+      return LINUXDO_TEXTS.some(t => all.includes(t)) || LINUXDO_HREFS.some(t => href.includes(t));
+    });
   }
 
-  button.click();
+  // SPA 渲染需要时间，登录按钮不会在页面"加载完成"后立即可见，这里轮询等待。
+  async function waitForLinuxdoControls(maxWaitMs = 6000) {
+    let controls = collectLinuxdoControls();
+    if (controls.length) return controls;
+    const deadline = Date.now() + maxWaitMs;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 400));
+      controls = collectLinuxdoControls();
+      if (controls.length) return controls;
+    }
+    return controls;
+  }
+
+  // 优先走 API 路径：new-api 的 /api/status 返回 linuxdo_client_id，
+  // /api/oauth/state 返回 state 随机字符串（同时写入 Gin session 供回调校验）。
+  // 用两者拼出标准 LinuxDO OAuth 授权地址，交给后台 chrome.tabs.update 主动导航，
+  // 完全绕开弹窗拦截，也不依赖 DOM 按钮渲染时机。
+  // 这与已跑通的 elysiver / 木鸢 linuxdoOAuth 步骤是同一条可靠路径。
+  // 注意：state 必须原样使用，不能拼接任何后缀——new-api 回调时要求
+  // query.state === session.oauth_state，任何改动都会导致 "state 参数为空或不匹配"。
+  try {
+    const [statusResponse, stateResponse] = await Promise.all([
+      fetch('/api/status', { credentials: 'include' }).then(r => r.json()).catch(() => null),
+      fetch('/api/oauth/state', { credentials: 'include' }).then(r => r.json()).catch(() => null)
+    ]);
+    const clientId = statusResponse?.data?.linuxdo_client_id || '';
+    const stateToken = stateResponse?.data || '';
+    if (clientId && stateToken) {
+      const authUrl = new URL('https://connect.linux.do/oauth2/authorize');
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('client_id', clientId);
+      authUrl.searchParams.set('state', stateToken);
+      return { action: 'navigate', url: authUrl.toString(), message: '通过 API 生成 LinuxDO 授权地址，由后台导航' };
+    }
+  } catch (e) {
+    // API 失败则回退到 DOM 按钮
+  }
+
+  // 1) 直接读取 a[href] 形式的 OAuth 入口
+  const initialControls = await waitForLinuxdoControls();
+  const directLink = initialControls.find(el => {
+    const href = (el.getAttribute('href') || '').toLowerCase();
+    return LINUXDO_HREFS.some(t => href.includes(t));
+  });
+  if (directLink && directLink.tagName === 'A' && directLink.href) {
+    return { action: 'navigate', url: directLink.href, message: '已找到 LinuxDO OAuth 直链，由后台导航' };
+  }
+
+  // 2) hook window.open，再点击按钮，捕获被弹窗拦截器拦掉的 OAuth 弹窗 URL。
+  //    若按钮是 location 赋值跳转，标签页会自行导航，后续 waitAuthorize 能直接感知，无需在此捕获。
+  let capturedUrl = '';
+  const originalOpen = window.open;
+  window.open = function (url) {
+    if (url && !capturedUrl) capturedUrl = String(url);
+    try { return originalOpen.apply(this, arguments); } catch { return null; }
+  };
+  let clickedText = '';
+  try {
+    const button = initialControls[0];
+    if (button) {
+      clickedText = (button.textContent || '').trim().slice(0, 60);
+      button.click();
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  } finally {
+    try { window.open = originalOpen; } catch {}
+  }
+
+  if (capturedUrl) {
+    return { action: 'navigate', url: capturedUrl, message: `已捕获 LinuxDO 跳转地址(${clickedText})` };
+  }
+
+  // 3) 点击后页面自身已经完成跳转（例如 SPA 内部导航到 connect.linux.do）
+  if (window.location.href.includes('connect.linux.do') || window.location.href.includes('/oauth')) {
+    return { action: 'continue', message: '已在 LinuxDO 授权页，继续后续授权步骤' };
+  }
+
   return {
-    action: 'continue',
-    message: '已点击 LinuxDO 登录按钮'
+    action: 'error',
+    message: '未找到 LinuxDO 登录按钮，且无法生成授权地址'
   };
 }
 
@@ -208,7 +296,8 @@ export const chybenzunAdapter = {
           type: 'waitAuthorize',
           authorizeSelector: 'button, a, input[type="submit"]',
           authorizeText: ['allow', 'authorize', 'agree', '同意', '允许', '授权', 'approve'],
-          successUrlIncludes: ['/profile', '/dashboard'],
+          successUrlIncludes: ['/profile', '/dashboard', '/console'],
+          successWaitTimeout: 45000,
           description: 'LinuxDO 授权确认'
         },
         {
