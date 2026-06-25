@@ -3,6 +3,7 @@ import { anyrouterAdapter } from './anyrouter.js';
 import { muyuanAdapter } from './muyuan.js';
 import { elysiverAdapter } from './elysiver.js';
 import { chybenzunAdapter } from './chybenzun.js';
+import { createRuleAdapter, hasRuleAdapter } from './rule-adapter.js';
 
 const adapters = [
   chybenzunAdapter,
@@ -13,6 +14,9 @@ const adapters = [
 ];
 
 export function getAdapterForSite(site) {
+  if (hasRuleAdapter(site)) {
+    return createRuleAdapter(site);
+  }
   return adapters.find(a => a.match(site.url)) || null;
 }
 
